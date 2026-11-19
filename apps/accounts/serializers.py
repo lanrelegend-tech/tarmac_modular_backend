@@ -26,11 +26,7 @@ class RegisterSerializer(serializers.ModelSerializer):
     password=serializers.CharField(write_only=True, min_length=8)
     class Meta: model=User; fields=("id","username","first_name","last_name","email","password","department","faculty","level")
     def validate_email(self, value):
-        value = value.strip().lower()
-        allowed_domains = [domain.strip().lower() for domain in os.getenv("SCHOOL_EMAIL_DOMAINS", "").split(",") if domain.strip()]
-        if allowed_domains and value.rsplit("@", 1)[-1] not in allowed_domains:
-            raise serializers.ValidationError("Use your school email address to register.")
-        return value
+        return value.strip().lower()
     def validate_matric_number(self, value):
         return value.strip().upper() if value else value
     def validate_password(self, value):

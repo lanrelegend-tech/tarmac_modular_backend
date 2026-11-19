@@ -13,7 +13,6 @@ DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 if not DEBUG and SECRET_KEY.startswith("replace-"):
     raise ImproperlyConfigured("Replace the example SECRET_KEY before production.")
 ALLOWED_HOSTS = [x.strip() for x in os.getenv("ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if x.strip()]
-SCHOOL_EMAIL_DOMAINS = [x.strip().lower() for x in os.getenv("SCHOOL_EMAIL_DOMAINS", "").split(",") if x.strip()]
 if not DEBUG and (not os.getenv("ALLOWED_HOSTS") or not any(host not in ("localhost", "127.0.0.1") for host in ALLOWED_HOSTS)):
     raise ImproperlyConfigured("Set ALLOWED_HOSTS for production.")
 if not DEBUG and not os.getenv("FRONTEND_ORIGIN"):
@@ -67,8 +66,6 @@ REDIS_URL = os.getenv("REDIS_URL", "")
 if not DEBUG and not REDIS_URL:
     raise ImproperlyConfigured("Set REDIS_URL for shared production caching and rate limits.")
 CACHES = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": REDIS_URL}} if REDIS_URL else {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "tarmac-local"}}
-if not DEBUG and not SCHOOL_EMAIL_DOMAINS:
-    raise ImproperlyConfigured("Set SCHOOL_EMAIL_DOMAINS to the school's student email domain(s).")
 AUTH_USER_MODEL = "accounts.User"
 AUTH_PASSWORD_VALIDATORS = [{"NAME":"django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},{"NAME":"django.contrib.auth.password_validation.MinimumLengthValidator"},{"NAME":"django.contrib.auth.password_validation.CommonPasswordValidator"},{"NAME":"django.contrib.auth.password_validation.NumericPasswordValidator"}]
 LANGUAGE_CODE = "en-us"
