@@ -1,0 +1,91 @@
+import mimetypes
+from django.db import models
+from django.http import FileResponse
+from rest_framework import viewsets
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework import status
+from apps.accounts.permissions import IsVerifiedStudent
+from apps.administration.permissions import PlatformFeatureEnabled
+from .models import LostFoundReport,ItemMatch,ItemMatchReview
+from .serializers import LostFoundReportSerializer,ItemMatchSerializer
+from .services import create_possible_matches
+from apps.notifications.services import notify_user
+class LostFoundReportViewSet(viewsets.ModelViewSet):
+    platform_feature = "lost_found_enabled"
+    serializer_class=LostFoundReportSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
+    search_fields = ["title", "description", "location", "colour", "identifying_details"]
+    filterset_fields = ["report_type", "category", "status"]
+    def get_queryset(self): return LostFoundReport.objects.filter(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
+    def perform_create(self,serializer):
+        if not self.request.user.is_student_verified or self.request.user.is_suspended: raise PermissionDenied("An active verified student account is required.")
+        report=serializer.save(reporter=self.request.user); create_possible_matches(report)
+    def perform_update(self,serializer):
+        if serializer.instance.reporter_id!=self.request.user.id: raise PermissionDenied("You can only update your own report.")
+        report = serializer.save()
+        create_possible_matches(report)
+    def perform_destroy(self, instance):
+        if instance.reporter_id != self.request.user.id:
+            raise PermissionDenied("You can only delete your own report.")
+        instance.delete()
+    @action(detail=True, methods=["get"], url_path="image-file")
+    def image_file(self, request, pk=None):
+        report = self.get_object()
+        if not report.image:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("This report has no image.")
+        content_type = mimetypes.guess_type(report.image.name)[0] or "application/octet-stream"
+        return FileResponse(report.image.open("rb"), content_type=content_type)
+    @action(detail=True, methods=["post"])
+    def close(self, request, pk=None):
+        report = self.get_object()
+        if report.reporter_id != request.user.id:
+            raise PermissionDenied("You can only close your own report.")
+        report.status = LostFoundReport.Status.CLOSED
+        report.is_active = False
+        report.save(update_fields=("status", "is_active"))
+        return Response({"status": report.status}, status=status.HTTP_200_OK)
+    @action(detail=True, methods=["post"])
+    def returned(self, request, pk=None):
+        report = self.get_object()
+        if report.reporter_id != request.user.id:
+            raise PermissionDenied("Only the report owner can confirm that the item was returned.")
+        if report.status == LostFoundReport.Status.RETURNED:
+            return Response({"status": report.status})
+        report.status = LostFoundReport.Status.RETURNED
+        report.is_active = False
+        report.save(update_fields=("status", "is_active"))
+        matches = ItemMatch.objects.filter(is_dismissed=False).filter(
+            models.Q(lost_report=report) | models.Q(found_report=report)
+        ).select_related("lost_report__reporter", "found_report__reporter")
+        notified = set()
+        for match in matches:
+            for other in (match.lost_report.reporter, match.found_report.reporter):
+                if other.pk != request.user.pk and other.pk not in notified:
+                    notify_user(other, "Lost item marked returned", f'"{report.title}" has been marked returned.',
+                                {"kind":"lost_found_returned", "report_id":report.pk}, f"lost-found-returned:{report.pk}:{other.pk}")
+                    notified.add(other.pk)
+        return Response({"status": report.status})
+class ItemMatchViewSet(viewsets.ReadOnlyModelViewSet):
+    platform_feature = "lost_found_enabled"
+    serializer_class=ItemMatchSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
+    def get_queryset(self): return (ItemMatch.objects.filter(lost_report__reporter=self.request.user)|ItemMatch.objects.filter(found_report__reporter=self.request.user)).filter(lost_report__is_active=True, found_report__is_active=True, is_dismissed=False)
+    @action(detail=True, methods=["post"])
+    def review(self, request, pk=None):
+        match = self.get_object()
+        decision = request.data.get("decision")
+        valid = [choice for choice, _label in ItemMatchReview.Decision.choices]
+        if decision not in valid:
+            return Response({"decision": [f"Choose one of: {', '.join(valid)}."]}, status=status.HTTP_400_BAD_REQUEST)
+        review, _created = ItemMatchReview.objects.update_or_create(
+            match=match,
+            user=request.user,
+            defaults={"decision": decision},
+        )
+        if decision == ItemMatchReview.Decision.POSSIBLE_MATCH:
+            other = match.found_report.reporter if request.user.pk == match.lost_report.reporter_id else match.lost_report.reporter
+            if other.pk != request.user.pk:
+                notify_user(other, "A student confirmed a possible item match", f'Another student confirmed a possible match for "{match.lost_report.title}".',
+                            {"kind":"lost_found_match_response", "match_id":match.pk}, f"lost-found-match-response:{match.pk}:{other.pk}")
+        return Response({"match_id": match.pk, "decision": review.decision}, status=status.HTTP_200_OK)
