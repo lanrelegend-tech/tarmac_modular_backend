@@ -1,6 +1,7 @@
 import os
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -38,13 +39,30 @@ TEMPLATES = [{"BACKEND":"django.template.backends.django.DjangoTemplates","DIRS"
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 if os.getenv("DB_ENGINE", "sqlite") == "postgres":
-    DATABASES = {"default": {"ENGINE":"django.db.backends.postgresql","NAME":os.getenv("DB_NAME"),"USER":os.getenv("DB_USER"),"PASSWORD":os.getenv("DB_PASSWORD"),"HOST":os.getenv("DB_HOST"),"PORT":os.getenv("DB_PORT") or "5432"}}
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if database_url:
+        parsed_database_url = urlparse(database_url)
+        if parsed_database_url.scheme not in ("postgres", "postgresql"):
+            raise ImproperlyConfigured("DATABASE_URL must use the postgres:// or postgresql:// scheme.")
+        query_options = parse_qs(parsed_database_url.query)
+        DATABASES = {"default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": unquote(parsed_database_url.path.lstrip("/")),
+            "USER": unquote(parsed_database_url.username or ""),
+            "PASSWORD": unquote(parsed_database_url.password or ""),
+            "HOST": parsed_database_url.hostname,
+            "PORT": parsed_database_url.port or "5432",
+            "OPTIONS": {"sslmode": query_options.get("sslmode", ["require"])[0]},
+            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "60")),
+        }}
+    else:
+        DATABASES = {"default": {"ENGINE":"django.db.backends.postgresql","NAME":os.getenv("DB_NAME"),"USER":os.getenv("DB_USER"),"PASSWORD":os.getenv("DB_PASSWORD"),"HOST":os.getenv("DB_HOST"),"PORT":os.getenv("DB_PORT") or "5432", "OPTIONS":{"sslmode":os.getenv("DB_SSLMODE", "prefer" if DEBUG else "require")}, "CONN_MAX_AGE":int(os.getenv("DB_CONN_MAX_AGE", "60"))}}
 else:
     DATABASES = {"default": {"ENGINE":"django.db.backends.sqlite3","NAME":BASE_DIR / os.getenv("DB_NAME", "db.sqlite3")}}
 if not DEBUG and os.getenv("DB_ENGINE", "sqlite") != "postgres":
     raise ImproperlyConfigured("Production must use PostgreSQL (set DB_ENGINE=postgres).")
-if not DEBUG and not all(os.getenv(key) for key in ("DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST")):
-    raise ImproperlyConfigured("Set DB_NAME, DB_USER, DB_PASSWORD, and DB_HOST for production PostgreSQL.")
+if not DEBUG and not os.getenv("DATABASE_URL") and not all(os.getenv(key) for key in ("DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST")):
+    raise ImproperlyConfigured("Set DATABASE_URL or DB_NAME, DB_USER, DB_PASSWORD, and DB_HOST for production PostgreSQL.")
 REDIS_URL = os.getenv("REDIS_URL", "")
 if not DEBUG and not REDIS_URL:
     raise ImproperlyConfigured("Set REDIS_URL for shared production caching and rate limits.")
