@@ -5,6 +5,7 @@ from django.core.files.storage import FileSystemStorage
 from django.utils.deconstruct import deconstructible
 from django.utils import timezone
 from uuid import uuid4
+from config.storage import PrivateCloudinaryImageStorage
 
 
 def report_evidence_upload_to(instance, filename):
@@ -27,7 +28,7 @@ class UserReport(models.Model):
 
 class ReportEvidence(models.Model):
     report = models.ForeignKey(UserReport, on_delete=models.CASCADE, related_name="evidence")
-    image = models.ImageField(upload_to=report_evidence_upload_to, storage=PrivateMediaStorage())
+    image = models.ImageField(upload_to=report_evidence_upload_to, storage=PrivateCloudinaryImageStorage())
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

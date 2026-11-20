@@ -21,6 +21,7 @@ INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",
     "rest_framework", "rest_framework_simplejwt", "rest_framework_simplejwt.token_blacklist", "django_filters", "corsheaders",
+    "cloudinary",
     "apps.accounts.apps.AccountsConfig", "apps.products.apps.ProductsConfig",
     "apps.ads.apps.AdsConfig",
     "apps.orders.apps.OrdersConfig", "apps.payments.apps.PaymentsConfig",
@@ -74,7 +75,13 @@ USE_I18N = True
 USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+STORAGES = {
+    "default": {"BACKEND": "config.storage.CloudinaryImageStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
+}
+CLOUDINARY_URL = os.getenv("CLOUDINARY_URL", "").strip()
+if not DEBUG and not CLOUDINARY_URL:
+    raise ImproperlyConfigured("Set CLOUDINARY_URL to persist optimized image uploads in Cloudinary.")
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 PRIVATE_MEDIA_ROOT = BASE_DIR / "private_media"

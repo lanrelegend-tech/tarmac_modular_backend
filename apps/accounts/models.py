@@ -4,6 +4,7 @@ from django.core.files.storage import FileSystemStorage
 from django.utils.deconstruct import deconstructible
 from django.db import models
 from django.db.models.functions import Lower
+from config.storage import PrivateCloudinaryImageStorage
 
 @deconstructible
 class PrivateStudentIDStorage(FileSystemStorage):
@@ -32,7 +33,7 @@ class User(AbstractUser):
 class StudentVerification(models.Model):
     class Status(models.TextChoices): PENDING="pending", "Pending"; APPROVED="approved", "Approved"; REJECTED="rejected", "Rejected"
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="verifications")
-    student_id_image = models.ImageField(upload_to="student_ids/", storage=PrivateStudentIDStorage(), blank=True, null=True); submitted_matric_number = models.CharField(max_length=40)
+    student_id_image = models.ImageField(upload_to="student_ids/", storage=PrivateCloudinaryImageStorage(), blank=True, null=True); submitted_matric_number = models.CharField(max_length=40)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     reviewed_by = models.ForeignKey("accounts.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="verification_reviews")
     reviewer_note = models.TextField(blank=True); created_at = models.DateTimeField(auto_now_add=True); reviewed_at = models.DateTimeField(null=True, blank=True)
@@ -64,7 +65,7 @@ class ProfileChangeRequest(models.Model):
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile_change_requests")
     requested_changes = models.JSONField(default=dict)
-    requested_profile_picture = models.ImageField(upload_to="profile_change_requests/", blank=True, null=True)
+    requested_profile_picture = models.ImageField(upload_to="profile_change_requests/", storage=PrivateCloudinaryImageStorage(), blank=True, null=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="profile_change_reviews")
     reviewed_at = models.DateTimeField(null=True, blank=True)

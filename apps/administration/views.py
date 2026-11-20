@@ -373,6 +373,13 @@ def dashboard(request):
         "lost_found": {"lost_open": LostFoundReport.objects.filter(report_type=LostFoundReport.Type.LOST, is_active=True).count(), "found_open": LostFoundReport.objects.filter(report_type=LostFoundReport.Type.FOUND, is_active=True).count(), "potential_matches": ItemMatch.objects.filter(is_dismissed=False).count(), "frequent_lost_items": list(LostFoundReport.objects.filter(report_type=LostFoundReport.Type.LOST).values("title").annotate(reports=Count("id")).order_by("-reports")[:10])},
         "ads": {"active": AdCampaign.objects.filter(status=AdCampaign.Status.ACTIVE, ends_at__gt=timezone.now()).count(), "pending_review": AdCampaign.objects.filter(status=AdCampaign.Status.PENDING_REVIEW).count()},
         "reports_unresolved": UserReport.objects.filter(is_resolved=False).count(),
+        "workflow": {
+            "pending_verifications": StudentVerification.objects.filter(status=StudentVerification.Status.PENDING).count(),
+            "pending_profile_changes": ProfileChangeRequest.objects.filter(status=ProfileChangeRequest.Status.PENDING).count(),
+            "open_support_tickets": SupportTicket.objects.filter(status__in=(SupportTicket.Status.OPEN, SupportTicket.Status.IN_PROGRESS)).count(),
+            "pending_lost_found_claims": ItemClaim.objects.filter(status=ItemClaim.Status.PENDING).count(),
+            "pending_reviews": SellerReview.objects.filter(status=SellerReview.Status.PENDING).count(),
+        },
     })
 
 @api_view(["GET"])
