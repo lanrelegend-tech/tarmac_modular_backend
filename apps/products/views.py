@@ -1,11 +1,13 @@
 import mimetypes
 from datetime import timedelta
 from django.db.models import F, Q
+from django.db.models import Count
+from rest_framework.exceptions import ValidationError
 from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import viewsets, permissions
 from apps.accounts.permissions import IsVerifiedStudent
-from apps.administration.models import PlatformSettings
+from apps.administration.models import PlatformSettings, AdminLog
 from apps.administration.permissions import PlatformFeatureEnabled
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
@@ -24,8 +26,23 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         if self.request.user and self.request.user.is_staff:
-            return Category.objects.all()
-        return Category.objects.filter(is_active=True, is_allowed_for_sale=True)
+            return Category.objects.annotate(products_count=Count("products"))
+        return Category.objects.filter(is_active=True, is_allowed_for_sale=True).annotate(products_count=Count("products"))
+
+    def perform_create(self, serializer):
+        category = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="category_created", target_type="Category", target_id=str(category.pk), metadata={"name": category.name})
+
+    def perform_update(self, serializer):
+        category = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="category_updated", target_type="Category", target_id=str(category.pk), metadata={"name": category.name, "is_active": category.is_active, "is_allowed_for_sale": category.is_allowed_for_sale})
+
+    def perform_destroy(self, instance):
+        if instance.products.exists():
+            raise ValidationError({"detail": "This category has listings. Move those listings to another category before deleting it."})
+        category_id, category_name = instance.pk, instance.name
+        instance.delete()
+        AdminLog.objects.create(actor=self.request.user, action="category_deleted", target_type="Category", target_id=str(category_id), metadata={"name": category_name})
 
 class ProductViewSet(viewsets.ModelViewSet):
     platform_feature = "marketplace_enabled"

@@ -19,7 +19,8 @@ class MessageAttachmentSerializer(serializers.ModelSerializer):
 
 class ConversationSerializer(serializers.ModelSerializer):
     participants_data = serializers.SerializerMethodField()
-    class Meta: model=Conversation; fields=("id","participants","participants_data","status","context_type","context_id","context_title","is_official","created_at","updated_at"); read_only_fields=("status","is_official","created_at","updated_at")
+    completed_by = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    class Meta: model=Conversation; fields=("id","participants","participants_data","status","context_type","context_id","context_title","is_official","completed_by","completed_at","created_at","updated_at"); read_only_fields=("status","is_official","completed_by","completed_at","created_at","updated_at")
 
     def get_participants_data(self, obj):
         return [{"id": user.pk, "name": user.get_full_name().strip() or user.username, "is_staff": user.is_staff} for user in obj.participants.all()]

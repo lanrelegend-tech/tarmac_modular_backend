@@ -115,7 +115,7 @@ class AdminConversationSerializer(serializers.ModelSerializer):
     class Meta:
         from apps.messaging.models import Conversation
         model = Conversation
-        fields = ("id", "participants_data", "messages", "unread_count", "status", "context_type", "context_title", "is_official", "created_at", "updated_at")
+        fields = ("id", "participants_data", "messages", "unread_count", "status", "context_type", "context_title", "is_official", "completed_by", "completed_at", "created_at", "updated_at")
     def get_participants_data(self, obj):
         return [{"id": user.pk, "name": user.get_full_name().strip() or user.username, "email": user.email, "phone": user.phone_number, "matric_number": user.matric_number, "is_staff": user.is_staff} for user in obj.participants.all()]
     def get_messages(self, obj):

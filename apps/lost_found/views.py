@@ -63,9 +63,15 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
         ).select_related("lost_report__reporter", "found_report__reporter")
         notified = set()
         for match in matches:
+            LostFoundReport.objects.filter(pk__in=(match.lost_report_id, match.found_report_id)).update(status=LostFoundReport.Status.RETURNED, is_active=False)
+            for conversation in Conversation.objects.filter(context_type=Conversation.ContextType.LOST_FOUND, context_id=match.pk):
+                conversation.status = Conversation.Status.RESOLVED
+                conversation.completed_at = timezone.now()
+                conversation.completed_by.add(match.lost_report.reporter, match.found_report.reporter)
+                conversation.save(update_fields=("status", "completed_at", "updated_at"))
             for other in (match.lost_report.reporter, match.found_report.reporter):
-                if other.pk != request.user.pk and other.pk not in notified:
-                    notify_user(other, "Lost item marked returned", f'"{report.title}" has been marked returned.',
+                if other.pk not in notified:
+                    notify_user(other, "Lost-and-found item marked returned", f'"{report.title}" has been marked returned. The related lost-and-found conversation is complete.',
                                 {"kind":"lost_found_returned", "report_id":report.pk}, f"lost-found-returned:{report.pk}:{other.pk}")
                     notified.add(other.pk)
         return Response({"status": report.status})

@@ -64,7 +64,13 @@ class PlatformSettings(models.Model):
     email_notifications_enabled = models.BooleanField(default=True)
     report_notifications_enabled = models.BooleanField(default=True)
     terms_text = models.TextField(default="These terms govern the use of the Tarmac student marketplace.")
-    privacy_text = models.TextField(default="Tarmac respects student privacy and protects account information.")
+    privacy_text = models.TextField(default="""Tarmac uses account information to provide student verification, marketplace, lost-and-found, messaging, and support services.
+
+Private information such as your email address, phone number, WhatsApp number, matriculation number, student ID card, verification documents, private report evidence, and account support details is not shown to other students, sold, or publicly disclosed. Access is limited to authorized Tarmac administrators who need the information to verify accounts, prevent abuse, provide support, or protect platform safety.
+
+Tarmac will not disclose private account details to other students or members of the public. Private information is disclosed to authorized school authorities only when they request it. Student ID images and matriculation numbers are not shown on public profiles.
+
+Some information you choose to place on your profile, such as your name, username, profile photo, department, level, and bio, is visible to signed-in verified students. Marketplace listings, reviews, and messages are visible to the people who use those features; authorized administrators may review them when needed for moderation, reports, or support. Lost-and-found contact details and report evidence are not displayed on public listings.""")
     community_guidelines_text = models.TextField(default="Students must treat other members with respect and use Tarmac responsibly.")
     maintenance_mode = models.BooleanField(default=False)
     maintenance_message = models.CharField(max_length=240, default="Tarmac is temporarily unavailable.")

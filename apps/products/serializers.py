@@ -2,7 +2,22 @@ from rest_framework import serializers
 from apps.administration.models import PlatformSettings
 from .models import Category, Product, ProductImage, Favourite
 class CategorySerializer(serializers.ModelSerializer):
+    products_count = serializers.IntegerField(read_only=True, default=0)
     class Meta: model=Category; fields="__all__"
+
+    def validate_subcategories(self, value):
+        if not isinstance(value, list) or len(value) > 50:
+            raise serializers.ValidationError("Provide a list of no more than 50 subcategories.")
+        clean = []
+        seen = set()
+        for item in value:
+            if not isinstance(item, str) or not item.strip() or len(item.strip()) > 80:
+                raise serializers.ValidationError("Each subcategory must be text up to 80 characters.")
+            label = item.strip()
+            if label.casefold() not in seen:
+                clean.append(label)
+                seen.add(label.casefold())
+        return clean
 class ProductImageSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
     class Meta: model=ProductImage; fields=("id","image","alt_text")

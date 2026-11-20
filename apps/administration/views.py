@@ -304,7 +304,16 @@ class AdminConversationViewSet(viewsets.GenericViewSet):
         conversation = self.get_object()
         value = request.data.get("status")
         if value not in Conversation.Status.values: raise ValidationError({"status": "Choose open or resolved."})
-        conversation.status = value; conversation.save(update_fields=("status", "updated_at"))
+        was_resolved = conversation.status == Conversation.Status.RESOLVED
+        conversation.status = value
+        if value == Conversation.Status.RESOLVED and not was_resolved:
+            conversation.completed_at = timezone.now()
+            for student in conversation.participants.filter(is_staff=False):
+                notify_user(student, "Tarmac conversation marked complete", "An administrator marked this Tarmac conversation as complete. You can reply to reopen it.", {"kind": "conversation_completed", "conversation_id": conversation.pk, "context_type": conversation.context_type}, f"admin-conversation-completed:{conversation.pk}:{conversation.completed_at.timestamp()}:{student.pk}")
+        elif value == Conversation.Status.OPEN:
+            conversation.completed_at = None
+            conversation.completed_by.clear()
+        conversation.save(update_fields=("status", "completed_at", "updated_at"))
         AdminLog.objects.create(actor=request.user, action=f"conversation_{value}", target_type="Conversation", target_id=str(conversation.pk), metadata={})
         return Response(self.get_serializer(conversation).data)
     @action(detail=True, methods=["post"], url_path="mark-read")
@@ -323,7 +332,9 @@ class AdminConversationViewSet(viewsets.GenericViewSet):
         if not conversation.is_official:
             conversation.is_official = True
         conversation.status = Conversation.Status.OPEN
-        conversation.save(update_fields=("is_official", "status", "updated_at"))
+        conversation.completed_at = None
+        conversation.completed_by.clear()
+        conversation.save(update_fields=("is_official", "status", "completed_at", "updated_at"))
         for student in conversation.participants.filter(is_staff=False):
             notify_user(student, "New message from Tarmac administration", body[:240], {"kind":"admin_conversation_reply", "conversation_id":conversation.pk}, f"admin-conversation-reply:{message.pk}:{student.pk}")
         AdminLog.objects.create(actor=request.user, action="conversation_admin_reply", target_type="Conversation", target_id=str(conversation.pk), metadata={"message_id":message.pk})
@@ -504,8 +515,12 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             notify_user(administrator, "New student support request", ticket.subject, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"support-ticket:{ticket.pk}:{administrator.pk}")
 
     def perform_update(self, serializer):
+        previous_status = serializer.instance.status
         ticket = serializer.save()
         AdminLog.objects.create(actor=self.request.user, action="support_ticket_updated", target_type="SupportTicket", target_id=str(ticket.pk), metadata={"status": ticket.status, "priority": ticket.priority})
+        if ticket.status == SupportTicket.Status.RESOLVED and previous_status != SupportTicket.Status.RESOLVED:
+            from apps.notifications.services import notify_user
+            notify_user(ticket.user, "Tarmac support request completed", f'Your support request "{ticket.subject}" was marked completed. You can reopen it from your support page if you still need help.', {"kind": "support_completed", "ticket_id": ticket.pk}, f"support-completed:{ticket.pk}:{ticket.updated_at.timestamp()}")
 
     @action(detail=True, methods=("post",))
     def reopen(self, request, pk=None):
@@ -515,8 +530,27 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         ticket.status = SupportTicket.Status.OPEN
         ticket.save(update_fields=("status", "updated_at"))
         AdminLog.objects.create(actor=request.user, action="support_ticket_reopened", target_type="SupportTicket", target_id=str(ticket.pk), metadata={})
-        for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=request.user.pk).iterator():
-            notify_user(administrator, "Student reopened a support request", ticket.subject, {"kind":"support_ticket_reopened", "ticket_id":ticket.pk}, f"support-ticket-reopen:{ticket.pk}:{ticket.updated_at.timestamp()}:{administrator.pk}")
+        notify_user(ticket.user, "Tarmac support request reopened", f'Your support request "{ticket.subject}" has been reopened.', {"kind":"support_ticket_reopened", "ticket_id":ticket.pk}, f"support-ticket-reopen:{ticket.pk}:{ticket.updated_at.timestamp()}:{ticket.user_id}")
+        if not request.user.is_staff:
+            for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=request.user.pk).iterator():
+                notify_user(administrator, "Student reopened a support request", ticket.subject, {"kind":"support_ticket_reopened", "ticket_id":ticket.pk}, f"support-ticket-reopen:{ticket.pk}:{ticket.updated_at.timestamp()}:{administrator.pk}")
+        return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
+
+    @action(detail=True, methods=("post",))
+    def complete(self, request, pk=None):
+        ticket = self.get_object()
+        if ticket.status == SupportTicket.Status.RESOLVED:
+            return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
+        ticket.status = SupportTicket.Status.RESOLVED
+        ticket.save(update_fields=("status", "updated_at"))
+        AdminLog.objects.create(actor=request.user, action="support_ticket_completed", target_type="SupportTicket", target_id=str(ticket.pk), metadata={"student_id": ticket.user_id})
+        from apps.notifications.services import notify_user
+        if request.user.is_staff:
+            notify_user(ticket.user, "Tarmac support request completed", f'Your support request "{ticket.subject}" was marked completed by Tarmac Support.', {"kind": "support_completed", "ticket_id": ticket.pk}, f"support-completed:{ticket.pk}:{ticket.updated_at.timestamp()}:{ticket.user_id}")
+        else:
+            notify_user(ticket.user, "Support request marked complete", f'You marked "{ticket.subject}" as completed. Reopen it from Support if you still need help.', {"kind": "support_completed", "ticket_id": ticket.pk}, f"support-completed:{ticket.pk}:{ticket.updated_at.timestamp()}:{ticket.user_id}")
+            for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=request.user.pk).iterator():
+                notify_user(administrator, "Student marked a support request complete", ticket.subject, {"kind": "support_completed", "ticket_id": ticket.pk}, f"support-completed:{ticket.pk}:{ticket.updated_at.timestamp()}:{administrator.pk}")
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
     @action(detail=True, methods=("post",))

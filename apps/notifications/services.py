@@ -79,6 +79,10 @@ def _send_email(notification):
         conversation_id = data.get("conversation_id")
         action_url = f"{origin}/messages?conversation={conversation_id}" if conversation_id else f"{origin}/messages"
         action_label = "Open official message"
+    elif kind in ("conversation_completed", "conversation_completion_requested"):
+        conversation_id = data.get("conversation_id")
+        action_url = f"{origin}/messages?conversation={conversation_id}" if conversation_id else f"{origin}/messages"
+        action_label = "Open Tarmac conversation"
     elif kind == "verification_review":
         action_url, action_label = f"{origin}/verify-student", "View verification status"
     elif kind in ("item_claim", "item_claim_review"):

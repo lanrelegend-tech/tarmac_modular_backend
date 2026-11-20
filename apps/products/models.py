@@ -3,6 +3,7 @@ from django.db import models
 from django.core.validators import MinValueValidator
 class Category(models.Model):
     name=models.CharField(max_length=80, unique=True); slug=models.SlugField(unique=True); is_active=models.BooleanField(default=True); is_allowed_for_sale=models.BooleanField(default=True)
+    description=models.CharField(max_length=500, blank=True); icon=models.CharField(max_length=16, default="📦"); subcategories=models.JSONField(default=list, blank=True)
     def __str__(self): return self.name
 class Product(models.Model):
     class Condition(models.TextChoices): LIKE_NEW="like_new","Like new"; VERY_GOOD="very_good","Very good"; GOOD="good","Good"; FAIR="fair","Fair"
