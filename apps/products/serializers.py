@@ -31,12 +31,32 @@ class ProductImageUploadSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if self.instance and attrs.get("product", self.instance.product) != self.instance.product:
             raise serializers.ValidationError({"product": "An image cannot be moved to another listing."})
-        if self.instance is None and attrs["product"].images.count() >= 5:
-            raise serializers.ValidationError({"product": "A listing can have at most five images."})
+        if self.instance is None:
+            from apps.administration.models import PlatformSettings
+            if attrs["product"].images.count() >= PlatformSettings.get_solo().max_product_images:
+                raise serializers.ValidationError({"product": "This listing has reached the image limit set by the school."})
         return attrs
 class ProductSerializer(serializers.ModelSerializer):
-    images=ProductImageSerializer(many=True,read_only=True); seller_id=serializers.IntegerField(source="seller.id",read_only=True)
-    class Meta: model=Product; fields=("id","seller_id","category","title","description","condition","price","negotiable","location","status","expires_at","images","created_at","updated_at"); read_only_fields=("status","expires_at","created_at","updated_at")
+    is_featured = serializers.SerializerMethodField()
+    images = ProductImageSerializer(many=True, read_only=True)
+    seller_id = serializers.IntegerField(source="seller.id", read_only=True)
+    seller_name = serializers.SerializerMethodField()
+    seller_department = serializers.CharField(source="seller.department", read_only=True)
+    seller_level = serializers.CharField(source="seller.level", read_only=True)
+    seller_joined = serializers.DateTimeField(source="seller.date_joined", read_only=True)
+    category_name = serializers.CharField(source="category.name", read_only=True)
+
+    class Meta:
+        model = Product
+        fields = ("id", "seller_id", "seller_name", "seller_department", "seller_level", "seller_joined", "category", "category_name", "title", "description", "condition", "price", "negotiable", "location", "status", "expires_at", "is_featured", "featured_until", "images", "created_at", "updated_at")
+        read_only_fields = ("status", "expires_at", "is_featured", "featured_until", "created_at", "updated_at")
+
+    def get_seller_name(self, obj):
+        return obj.seller.get_full_name().strip() or obj.seller.username
+    def get_is_featured(self, obj):
+        from django.utils import timezone
+        from apps.administration.models import PlatformSettings
+        return bool(PlatformSettings.get_solo().featured_products_enabled and obj.is_featured and (obj.featured_until is None or obj.featured_until > timezone.now()))
     def validate_category(self, category):
         if not category.is_active or not category.is_allowed_for_sale:
             raise serializers.ValidationError("This category is not currently available for listings.")

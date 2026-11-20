@@ -50,7 +50,9 @@ def notify_possible_match(match):
 
 def notify_user(user, subject, body, data, event_key):
     queue_notification(user, Notification.Channel.IN_APP, subject, body, data, f"{event_key}:in_app")
-    if user.notification_email_enabled and user.email:
+    from apps.administration.models import PlatformSettings
+    platform = PlatformSettings.get_solo()
+    if platform.email_notifications_enabled and user.notification_email_enabled and user.email:
         queue_notification(user, Notification.Channel.EMAIL, subject, body, data, f"{event_key}:email")
     if user.notification_whatsapp_enabled and user.whatsapp_consent_at and user.whatsapp_number:
         template_key = {"lost_found_match": "WHATSAPP_MATCH_TEMPLATE", "order_update": "WHATSAPP_ORDER_TEMPLATE", "listing_active": "WHATSAPP_LISTING_TEMPLATE", "listing_review": "WHATSAPP_LISTING_TEMPLATE", "ad_review": "WHATSAPP_AD_TEMPLATE", "ad_approved": "WHATSAPP_AD_TEMPLATE"}.get(data.get("kind"))

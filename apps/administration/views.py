@@ -4,12 +4,14 @@ import mimetypes
 from django.db import transaction
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
-from rest_framework import viewsets,permissions, status
+from rest_framework import viewsets,permissions, status, generics
 from rest_framework.decorators import action, api_view, permission_classes as drf_permission_classes
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from django.db import models
 from django.db.models import Count, Sum
+from django.db.models.functions import TruncDate
+from django.db.models import Prefetch
 from django.utils import timezone
 from apps.accounts.permissions import IsVerifiedStudent
 from apps.accounts.models import User
@@ -17,10 +19,11 @@ from apps.accounts.models import StudentVerification
 from apps.reviews.models import SellerReview
 from apps.products.models import Product
 from apps.payments.models import Payment
-from apps.lost_found.models import LostFoundReport, ItemMatch
+from apps.lost_found.models import LostFoundReport, ItemMatch, ItemClaim
 from apps.ads.models import AdCampaign
-from .models import UserReport,ReportEvidence,Announcement,AdminLog,PlatformSettings
-from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminAccountSerializer
+from apps.messaging.models import Conversation, Message
+from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
+from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminAccountSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
 from apps.notifications.services import notify_user
 class UserReportViewSet(viewsets.ModelViewSet):
     serializer_class=UserReportSerializer
@@ -37,29 +40,63 @@ class UserReportViewSet(viewsets.ModelViewSet):
         return queryset if self.request.user.is_staff else queryset.filter(reporter=self.request.user)
 
     def perform_create(self,serializer):
-        serializer.save(reporter=self.request.user)
+        report = serializer.save(reporter=self.request.user)
+        if PlatformSettings.get_solo().report_notifications_enabled:
+            for administrator in User.objects.filter(is_staff=True, is_active=True):
+                notify_user(administrator, "New student report", f"A student submitted report #{report.pk}. Open the admin report queue to review it.", {"kind":"user_report", "report_id":report.pk}, f"user-report:{report.pk}:admin:{administrator.pk}")
 
     def perform_update(self, serializer):
         if not self.request.user.is_staff:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Only school administrators can update a report.")
         report = serializer.save()
-        AdminLog.objects.create(actor=self.request.user, action="user_report_resolved" if report.is_resolved else "user_report_updated", target_type="UserReport", target_id=str(report.pk), metadata={})
+        if report.status == UserReport.Status.INVESTIGATING and report.assigned_to_id is None:
+            report.assigned_to = self.request.user
+        if report.status in (UserReport.Status.RESOLVED, UserReport.Status.DISMISSED):
+            report.is_resolved = True
+        else:
+            report.is_resolved = False
+        report.save(update_fields=("is_resolved",))
+        AdminLog.objects.create(actor=self.request.user, action=f"user_report_{report.status}", target_type="UserReport", target_id=str(report.pk), metadata={"reviewer_note": report.reviewer_note})
+    @action(detail=True, methods=("post",))
+    def warn(self, request, pk=None):
+        report = self.get_object()
+        if not report.reported_user_id:
+            raise ValidationError({"reported_user": "This report is not associated with a student account."})
+        note = str(request.data.get("note", "")).strip()
+        if len(note) < 5:
+            raise ValidationError({"note": "Add a short explanation for the warning."})
+        notify_user(report.reported_user, "Official Tarmac warning", note, {"kind": "admin_warning", "report_id": report.pk}, f"admin-warning:{report.pk}")
+        AdminLog.objects.create(actor=request.user, action="user_warning_issued", target_type="User", target_id=str(report.reported_user_id), metadata={"report_id": report.pk, "note": note})
+        return Response({"warned": True})
 class AnnouncementViewSet(viewsets.ModelViewSet):
     serializer_class=AnnouncementSerializer
     def get_queryset(self):
         if self.request.user.is_staff:
             return Announcement.objects.select_related("created_by").all()
-        return Announcement.objects.filter(is_published=True).filter(
+        return Announcement.objects.none() if not PlatformSettings.get_solo().announcements_enabled else Announcement.objects.filter(is_published=True).filter(
             models.Q(audience=Announcement.Audience.ALL_VERIFIED) |
             models.Q(audience=Announcement.Audience.DEPARTMENT, department__iexact=self.request.user.department)
         ).select_related("created_by")
     def get_permissions(self):
+        if self.action in ("saved", "toggle_saved"):
+            return [IsVerifiedStudent()]
         if self.action in ("list", "retrieve"):
             if self.request.user and self.request.user.is_staff:
                 return [permissions.IsAdminUser()]
             return [IsVerifiedStudent()]
         return [permissions.IsAdminUser()]
+    @action(detail=False, methods=["get"])
+    def saved(self, request):
+        ids = AnnouncementBookmark.objects.filter(user=request.user, announcement__is_published=True).values_list("announcement_id", flat=True)
+        return Response({"ids": list(ids)})
+    @action(detail=True, methods=["post"], url_path="toggle-saved")
+    def toggle_saved(self, request, pk=None):
+        announcement = self.get_object()
+        bookmark, created = AnnouncementBookmark.objects.get_or_create(user=request.user, announcement=announcement)
+        if not created:
+            bookmark.delete()
+        return Response({"saved": created, "announcement_id": announcement.pk})
     def perform_create(self, serializer):
         audience = serializer.validated_data.get("audience", Announcement.Audience.ALL_VERIFIED)
         if audience == Announcement.Audience.DEPARTMENT and not serializer.validated_data.get("department", "").strip():
@@ -67,6 +104,8 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
         serializer.save(created_by=self.request.user)
     @action(detail=True, methods=["post"])
     def publish(self, request, pk=None):
+        if not PlatformSettings.get_solo().announcements_enabled:
+            raise ValidationError("Announcements are currently disabled in platform settings.")
         announcement = self.get_object()
         if announcement.is_published:
             return Response({"detail": "This announcement has already been published."}, status=status.HTTP_409_CONFLICT)
@@ -76,6 +115,13 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
         announcement.save(update_fields=("is_published", "published_at"))
         AdminLog.objects.create(actor=request.user, action="announcement_published", target_type="Announcement", target_id=str(announcement.pk), metadata={"audience":announcement.audience,"department":announcement.department})
         return Response({"published": True, "delivery_queued": True})
+    @action(detail=True, methods=["patch"])
+    def pin(self, request, pk=None):
+        announcement = self.get_object()
+        announcement.pinned = bool(request.data.get("pinned", not announcement.pinned))
+        announcement.save(update_fields=("pinned",))
+        AdminLog.objects.create(actor=request.user, action="announcement_pinned" if announcement.pinned else "announcement_unpinned", target_type="Announcement", target_id=str(announcement.pk), metadata={})
+        return Response({"pinned": announcement.pinned})
 class AdminLogViewSet(viewsets.ReadOnlyModelViewSet): queryset=AdminLog.objects.all(); serializer_class=AdminLogSerializer; permission_classes=[permissions.IsAdminUser]
 
 @api_view(["GET"])
@@ -129,6 +175,9 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], url_path="student-id")
     def student_id(self, request, pk=None):
         verification = get_object_or_404(StudentVerification, pk=pk)
+        if not verification.student_id_image:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("No student ID image was submitted.")
         content_type = mimetypes.guess_type(verification.student_id_image.name)[0] or "application/octet-stream"
         return FileResponse(verification.student_id_image.open("rb"), content_type=content_type)
 
@@ -154,6 +203,62 @@ class AdminAccountViewSet(viewsets.ModelViewSet):
         account = serializer.save()
         AdminLog.objects.create(actor=self.request.user, action="student_account_updated", target_type="User", target_id=str(account.pk), metadata={"is_active": account.is_active, "is_suspended": account.is_suspended})
 
+class AdminConversationViewSet(viewsets.GenericViewSet):
+    serializer_class = AdminConversationSerializer
+    permission_classes = [permissions.IsAdminUser]
+    http_method_names = ["get", "patch", "post", "head", "options"]
+    def get_queryset(self):
+        latest_messages = Message.objects.select_related("sender").order_by("-created_at")[:50]
+        return Conversation.objects.annotate(unread_count=Count("messages", filter=models.Q(messages__sender__is_staff=False, messages__read_at__isnull=True))).prefetch_related("participants", Prefetch("messages", queryset=latest_messages, to_attr="recent_messages")).order_by("-updated_at")
+    def list(self, request):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        return self.get_paginated_response(self.get_serializer(page, many=True).data) if page is not None else Response(self.get_serializer(queryset, many=True).data)
+    def retrieve(self, request, pk=None): return Response(self.get_serializer(self.get_object()).data)
+    def partial_update(self, request, pk=None):
+        conversation = self.get_object()
+        value = request.data.get("status")
+        if value not in Conversation.Status.values: raise ValidationError({"status": "Choose open or resolved."})
+        conversation.status = value; conversation.save(update_fields=("status", "updated_at"))
+        AdminLog.objects.create(actor=request.user, action=f"conversation_{value}", target_type="Conversation", target_id=str(conversation.pk), metadata={})
+        return Response(self.get_serializer(conversation).data)
+    @action(detail=True, methods=["post"], url_path="mark-read")
+    def mark_read(self, request, pk=None):
+        conversation = self.get_object()
+        conversation.messages.filter(read_at__isnull=True).exclude(sender__is_staff=True).update(read_at=timezone.now())
+        return Response({"conversation": conversation.pk, "read": True})
+    @action(detail=True, methods=["post"])
+    def reply(self, request, pk=None):
+        conversation = self.get_object()
+        body = str(request.data.get("body", "")).strip()
+        if not body or len(body) > 5000: raise ValidationError({"body": "Enter a message up to 5,000 characters."})
+        message = Message.objects.create(conversation=conversation, sender=request.user, body=body)
+        conversation.status = Conversation.Status.OPEN
+        conversation.save(update_fields=("status", "updated_at"))
+        for student in conversation.participants.filter(is_staff=False):
+            notify_user(student, "New message from Tarmac administration", body[:240], {"kind":"admin_conversation_reply", "conversation_id":conversation.pk}, f"admin-conversation-reply:{message.pk}:{student.pk}")
+        AdminLog.objects.create(actor=request.user, action="conversation_admin_reply", target_type="Conversation", target_id=str(conversation.pk), metadata={"message_id":message.pk})
+        conversation = self.get_queryset().get(pk=conversation.pk)
+        return Response(AdminConversationSerializer(conversation, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+class SubscriptionPlanViewSet(viewsets.ModelViewSet):
+    serializer_class = SubscriptionPlanSerializer
+    def get_queryset(self):
+        queryset = SubscriptionPlan.objects.all()
+        return queryset if self.request.user.is_staff else queryset.filter(is_active=True)
+    def get_permissions(self): return [permissions.AllowAny()] if self.action in ("list", "retrieve") else [permissions.IsAdminUser()]
+    def perform_create(self, serializer):
+        plan = serializer.save(); AdminLog.objects.create(actor=self.request.user, action="subscription_plan_created", target_type="SubscriptionPlan", target_id=str(plan.pk), metadata={})
+    def perform_update(self, serializer):
+        plan = serializer.save(); AdminLog.objects.create(actor=self.request.user, action="subscription_plan_updated", target_type="SubscriptionPlan", target_id=str(plan.pk), metadata={})
+
+class StudentSubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = StudentSubscriptionSerializer
+    def get_permissions(self): return [permissions.IsAdminUser()] if self.request.user.is_staff else [IsVerifiedStudent()]
+    def get_queryset(self):
+        queryset = StudentSubscription.objects.select_related("user", "plan")
+        return queryset if self.request.user.is_staff else queryset.filter(user=self.request.user)
+
 @api_view(["GET"])
 @drf_permission_classes([permissions.IsAdminUser])
 def dashboard(request):
@@ -169,6 +274,26 @@ def dashboard(request):
         "ads": {"active": AdCampaign.objects.filter(status=AdCampaign.Status.ACTIVE, ends_at__gt=timezone.now()).count(), "pending_review": AdCampaign.objects.filter(status=AdCampaign.Status.PENDING_REVIEW).count()},
         "reports_unresolved": UserReport.objects.filter(is_resolved=False).count(),
     })
+
+@api_view(["GET"])
+@drf_permission_classes([permissions.IsAdminUser])
+def analytics(request):
+    try:
+        days = int(request.query_params.get("days", 30))
+    except (TypeError, ValueError):
+        raise ValidationError({"days": "Choose a period of 7, 30, or 90 days."})
+    if days not in (7, 30, 90):
+        raise ValidationError({"days": "Choose a period of 7, 30, or 90 days."})
+    start = timezone.localdate() - timedelta(days=days - 1)
+    registrations = {row["day"].isoformat(): row["total"] for row in User.objects.filter(date_joined__date__gte=start).annotate(day=TruncDate("date_joined")).values("day").annotate(total=Count("id"))}
+    payments = {row["day"].isoformat(): row for row in Payment.objects.filter(status=Payment.Status.SUCCESS, paid_at__date__gte=start).annotate(day=TruncDate("paid_at")).values("day").annotate(count=Count("id"), revenue_kobo=Sum("amount_kobo"))}
+    lost_found = {row["day"].isoformat(): row["total"] for row in LostFoundReport.objects.filter(created_at__date__gte=start).annotate(day=TruncDate("created_at")).values("day").annotate(total=Count("id"))}
+    series = []
+    for offset in range(days):
+        day = (start + timedelta(days=offset)).isoformat()
+        payment = payments.get(day, {})
+        series.append({"date": day, "registrations": registrations.get(day, 0), "payments": payment.get("count", 0), "revenue_kobo": payment.get("revenue_kobo") or 0, "lost_found_reports": lost_found.get(day, 0)})
+    return Response({"days": days, "series": series, "totals": {"registrations": sum(row["registrations"] for row in series), "payments": sum(row["payments"] for row in series), "revenue_kobo": sum(row["revenue_kobo"] for row in series), "lost_found_reports": sum(row["lost_found_reports"] for row in series)}})
 
 @api_view(["POST"])
 @drf_permission_classes([permissions.IsAdminUser])
@@ -210,3 +335,205 @@ def system_status(request):
             "payments_enabled": config.paystack_enabled,
         },
     })
+
+class SupportTicketViewSet(viewsets.ModelViewSet):
+    serializer_class = SupportTicketSerializer
+    permission_classes = [permissions.IsAdminUser | IsVerifiedStudent]
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        queryset = SupportTicket.objects.select_related("user").prefetch_related("messages__sender", "messages__attachments")
+        return queryset if self.request.user.is_staff else queryset.filter(user=self.request.user)
+
+    def get_permissions(self):
+        if self.action == "partial_update":
+            return [permissions.IsAdminUser()]
+        return super().get_permissions()
+
+    def perform_create(self, serializer):
+        ticket = serializer.save(user=self.request.user)
+        from apps.notifications.services import notify_user
+        for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=self.request.user.pk).iterator():
+            notify_user(administrator, "New student support request", ticket.subject, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"support-ticket:{ticket.pk}:{administrator.pk}")
+
+    def perform_update(self, serializer):
+        ticket = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="support_ticket_updated", target_type="SupportTicket", target_id=str(ticket.pk), metadata={"status": ticket.status, "priority": ticket.priority})
+
+    @action(detail=True, methods=("post",))
+    def reopen(self, request, pk=None):
+        ticket = self.get_object()
+        if ticket.status != SupportTicket.Status.RESOLVED:
+            raise ValidationError({"status": "Only resolved tickets can be reopened."})
+        ticket.status = SupportTicket.Status.OPEN
+        ticket.save(update_fields=("status", "updated_at"))
+        AdminLog.objects.create(actor=request.user, action="support_ticket_reopened", target_type="SupportTicket", target_id=str(ticket.pk), metadata={})
+        for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=request.user.pk).iterator():
+            notify_user(administrator, "Student reopened a support request", ticket.subject, {"kind":"support_ticket_reopened", "ticket_id":ticket.pk}, f"support-ticket-reopen:{ticket.pk}:{ticket.updated_at.timestamp()}:{administrator.pk}")
+        return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
+
+    @action(detail=True, methods=("post",))
+    def reply(self, request, pk=None):
+        ticket = self.get_object()
+        body = str(request.data.get("body", "")).strip()
+        uploads = request.data.getlist("attachment_files") if hasattr(request.data, "getlist") else []
+        if not body or len(body) > 5000:
+            raise ValidationError({"body": "Enter a reply of 1 to 5,000 characters."})
+        if len(uploads) > 5:
+            raise ValidationError({"attachment_files": "Attach at most five files."})
+        for upload in uploads:
+            if upload.size > 5 * 1024 * 1024 or upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
+                raise ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files no larger than 5 MB."})
+        if ticket.status == SupportTicket.Status.RESOLVED and not request.user.is_staff:
+            raise ValidationError({"status": "This ticket is resolved. Ask an administrator to reopen it."})
+        from django.utils.text import get_valid_filename
+        with transaction.atomic():
+            message = SupportMessage.objects.create(ticket=ticket, sender=request.user, body=body)
+            for upload in uploads:
+                SupportAttachment.objects.create(message=message, file=upload, original_name=get_valid_filename(upload.name)[:255], content_type=upload.content_type)
+            if ticket.status == SupportTicket.Status.OPEN and request.user.is_staff:
+                ticket.status = SupportTicket.Status.IN_PROGRESS
+                ticket.save(update_fields=("status", "updated_at"))
+        from apps.notifications.services import notify_user
+        if request.user.is_staff:
+            notify_user(ticket.user, f"Support replied: {ticket.subject}", body[:500], {"kind": "support_reply", "ticket_id": ticket.pk}, f"support-reply:{message.pk}:{ticket.user_id}")
+        else:
+            for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=request.user.pk).iterator():
+                notify_user(administrator, f"Student replied: {ticket.subject}", body[:500], {"kind": "support_reply", "ticket_id": ticket.pk}, f"support-reply:{message.pk}:{administrator.pk}")
+        ticket.refresh_from_db()
+        return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
+
+
+@api_view(["GET"])
+@drf_permission_classes([permissions.IsAuthenticated])
+def support_attachment_file(request, attachment_id):
+    attachment = get_object_or_404(SupportAttachment.objects.select_related("message__ticket"), pk=attachment_id)
+    if not request.user.is_staff and attachment.message.ticket.user_id != request.user.pk:
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("You cannot view attachments for another student's support ticket.")
+    return FileResponse(attachment.file.open("rb"), content_type=attachment.content_type)
+
+class IsSuperUser(permissions.BasePermission):
+    message = "Only a superuser can change platform-wide settings."
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+class PlatformSettingsView(generics.RetrieveUpdateAPIView):
+    serializer_class = PlatformSettingsSerializer
+    permission_classes = [IsSuperUser]
+    http_method_names = ["get", "patch", "head", "options"]
+    def get_object(self):
+        return PlatformSettings.get_solo()
+    def perform_update(self, serializer):
+        settings_obj = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="platform_settings_updated", target_type="PlatformSettings", target_id="1", metadata={key: getattr(settings_obj, key) for key in ("maintenance_mode", "marketplace_enabled", "lost_found_enabled", "messaging_enabled", "ads_enabled", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled")})
+
+class AdminPaymentViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = AdminPaymentSerializer
+    permission_classes = [permissions.IsAdminUser]
+    def get_queryset(self):
+        return Payment.objects.select_related("user", "product", "advertisement", "subscription_plan").order_by("-created_at")
+
+class AdminLostFoundViewSet(viewsets.ModelViewSet):
+    serializer_class = AdminLostFoundSerializer
+    permission_classes = [permissions.IsAdminUser]
+    http_method_names = ["get", "patch", "head", "options"]
+    def get_queryset(self):
+        return LostFoundReport.objects.select_related("reporter", "category").order_by("-created_at")
+    def perform_update(self, serializer):
+        report = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="lost_found_report_moderated", target_type="LostFoundReport", target_id=str(report.pk), metadata={"status": report.status, "is_active": report.is_active})
+    @action(detail=True, methods=("get",), url_path="image")
+    def image(self, request, pk=None):
+        report = self.get_object()
+        if not report.image:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("This report has no image.")
+        content_type = mimetypes.guess_type(report.image.name)[0] or "application/octet-stream"
+        return FileResponse(report.image.open("rb"), content_type=content_type)
+
+class AdminItemClaimViewSet(viewsets.ModelViewSet):
+    serializer_class = AdminItemClaimSerializer
+    permission_classes = [permissions.IsAdminUser]
+    http_method_names = ["get", "patch", "head", "options"]
+    def get_queryset(self): return ItemClaim.objects.select_related("report", "claimant", "reviewed_by").order_by("status", "created_at")
+    @transaction.atomic
+    def perform_update(self, serializer):
+        claim = ItemClaim.objects.select_for_update().select_related("report", "claimant").get(pk=serializer.instance.pk)
+        if claim.status != ItemClaim.Status.PENDING:
+            raise ValidationError({"status": "This claim has already been reviewed."})
+        status_value = serializer.validated_data.get("status")
+        if status_value not in (ItemClaim.Status.APPROVED, ItemClaim.Status.REJECTED):
+            raise ValidationError({"status": "Choose approved or rejected."})
+        claim.status = status_value
+        claim.reviewer_note = serializer.validated_data.get("reviewer_note", "")
+        claim.reviewed_by = self.request.user
+        claim.reviewed_at = timezone.now()
+        claim.save(update_fields=("status", "reviewer_note", "reviewed_by", "reviewed_at"))
+        AdminLog.objects.create(actor=self.request.user, action=f"item_claim_{status_value}", target_type="ItemClaim", target_id=str(claim.pk), metadata={"report_id": claim.report_id})
+        notify_user(claim.claimant, "Your found-item claim was reviewed", "Your claim was approved." if status_value == ItemClaim.Status.APPROVED else "Your claim was not approved. Sign in to review the administrator's note.", {"kind":"item_claim_review", "claim_id":claim.pk,"status":status_value}, f"item-claim-reviewed:{claim.pk}")
+        serializer.instance = claim
+
+class AdminItemMatchViewSet(viewsets.ModelViewSet):
+    serializer_class = AdminItemMatchSerializer
+    permission_classes = [permissions.IsAdminUser]
+    http_method_names = ["get", "patch", "head", "options"]
+    filterset_fields = ["is_reviewed", "is_dismissed"]
+    def get_queryset(self): return ItemMatch.objects.select_related("lost_report__reporter", "found_report__reporter").order_by("-score", "-created_at")
+    def perform_update(self, serializer):
+        match = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="item_match_reviewed" if match.is_reviewed else "item_match_dismissed", target_type="ItemMatch", target_id=str(match.pk), metadata={"is_dismissed":match.is_dismissed})
+        if match.is_reviewed and not match.is_dismissed:
+            match = ItemMatch.objects.select_related("lost_report__reporter", "found_report__reporter").get(pk=match.pk)
+            for owner, title in ((match.lost_report.reporter, match.lost_report.title), (match.found_report.reporter, match.found_report.title)):
+                notify_user(owner, "A possible lost-and-found match was confirmed", f'An administrator confirmed a possible match for "{title}". Open Lost & Found to contact the other student.', {"kind":"lost_found_match", "match_id":match.pk,"report_title":title}, f"admin-confirmed-match:{match.pk}:{owner.pk}")
+
+class AdminProductViewSet(viewsets.ModelViewSet):
+    serializer_class = AdminProductSerializer
+    permission_classes = [permissions.IsAdminUser]
+    http_method_names = ["get", "patch", "head", "options"]
+    def get_queryset(self):
+        return Product.objects.select_related("seller", "category").prefetch_related("images").order_by("-created_at")
+    @action(detail=True, methods=("get",), url_path="image")
+    def image(self, request, pk=None):
+        product = self.get_object()
+        image = product.images.first()
+        if not image:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("This listing has no image.")
+        content_type = mimetypes.guess_type(image.image.name)[0] or "application/octet-stream"
+        return FileResponse(image.image.open("rb"), content_type=content_type)
+    @transaction.atomic
+    def perform_update(self, serializer):
+        product = Product.objects.select_for_update().select_related("seller").get(pk=serializer.instance.pk)
+        next_status = serializer.validated_data.get("status", product.status)
+        if "is_featured" in serializer.validated_data:
+            product.is_featured = serializer.validated_data["is_featured"]
+            product.featured_until = timezone.now() + timedelta(days=30) if product.is_featured else None
+            AdminLog.objects.create(actor=self.request.user, action="marketplace_listing_featured" if product.is_featured else "marketplace_listing_unfeatured", target_type="Product", target_id=str(product.pk), metadata={"seller_id": product.seller_id})
+        if next_status == Product.Status.PENDING_REVIEW and product.status == Product.Status.REMOVED:
+            product.status = Product.Status.PENDING_REVIEW
+            product.save(update_fields=("status", "is_featured", "featured_until", "updated_at"))
+            AdminLog.objects.create(actor=self.request.user, action="marketplace_listing_restored_for_review", target_type="Product", target_id=str(product.pk), metadata={"seller_id": product.seller_id})
+            serializer.instance = product
+            return
+        if next_status == Product.Status.ACTIVE:
+            platform = PlatformSettings.get_solo()
+            payment_required = platform.listing_fee_enabled and platform.paystack_enabled
+            paid = Payment.objects.filter(product=product, status=Payment.Status.SUCCESS).exists()
+            if product.status != Product.Status.PENDING_REVIEW:
+                raise ValidationError({"status": "Only listings pending review can be approved."})
+            if payment_required and not paid:
+                raise ValidationError({"payment": "A successful listing payment is required before approval."})
+            product.status = Product.Status.ACTIVE
+            product.expires_at = timezone.now() + timedelta(days=30)
+            product.save(update_fields=("status", "expires_at", "is_featured", "featured_until", "updated_at"))
+        elif next_status == Product.Status.REMOVED:
+            product.status = Product.Status.REMOVED
+            product.save(update_fields=("status", "is_featured", "featured_until", "updated_at"))
+        elif next_status == product.status:
+            product.save(update_fields=("is_featured", "featured_until", "updated_at"))
+        else:
+            raise ValidationError({"status": "Choose active to approve or removed to reject a pending listing."})
+        AdminLog.objects.create(actor=self.request.user, action=f"marketplace_listing_{product.status}", target_type="Product", target_id=str(product.pk), metadata={"seller_id": product.seller_id})
+        serializer.instance = product

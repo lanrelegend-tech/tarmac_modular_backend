@@ -1,10 +1,10 @@
 from django.contrib import admin
 from django.conf import settings
-from .models import UserReport,Announcement,AdminLog,PlatformSettings
+from .models import UserReport,Announcement,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
 
 @admin.register(PlatformSettings)
 class PlatformSettingsAdmin(admin.ModelAdmin):
-    fields = ("maintenance_mode", "maintenance_message", "marketplace_enabled", "lost_found_enabled", "messaging_enabled", "ads_enabled", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "ad_fee_enabled", "ad_fee_kobo", "updated_at")
+    fields = ("site_name", "site_logo", "tagline", "support_email", "contact_email", "terms_text", "privacy_text", "community_guidelines_text", "maintenance_mode", "maintenance_message", "registration_enabled", "marketplace_enabled", "lost_found_enabled", "messaging_enabled", "ads_enabled", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled", "listing_approval_required", "max_product_images", "student_verification_enabled", "require_student_id", "email_verification_required", "auto_approve_students", "featured_products_enabled", "reviews_enabled", "review_moderation_enabled", "announcements_enabled", "email_notifications_enabled", "report_notifications_enabled", "updated_at")
     readonly_fields = ("updated_at",)
     def has_change_permission(self, request, obj=None):
         return request.user.is_superuser and super().has_change_permission(request, obj)
@@ -20,4 +20,17 @@ class PlatformSettingsAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
         AdminLog.objects.create(actor=request.user, action="platform_settings_updated", target_type="PlatformSettings", target_id="1", metadata={key:getattr(obj, key) for key in ("maintenance_mode", "marketplace_enabled", "lost_found_enabled", "messaging_enabled", "ads_enabled", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "ad_fee_enabled", "ad_fee_kobo")})
 
-admin.site.register([UserReport,Announcement,AdminLog])
+@admin.register(SupportTicket)
+class SupportTicketAdmin(admin.ModelAdmin):
+    list_display = ("subject", "user", "category", "status", "priority", "updated_at")
+    list_filter = ("status", "priority", "category")
+    search_fields = ("subject", "user__email", "messages__body")
+
+@admin.register(SupportMessage)
+class SupportMessageAdmin(admin.ModelAdmin):
+    list_display = ("ticket", "sender", "created_at")
+    readonly_fields = ("ticket", "sender", "body", "created_at")
+    def has_add_permission(self, request): return False
+    def has_change_permission(self, request, obj=None): return False
+
+admin.site.register([UserReport,Announcement,AdminLog,SupportAttachment,SubscriptionPlan,StudentSubscription])

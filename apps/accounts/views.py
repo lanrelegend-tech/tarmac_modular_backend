@@ -21,7 +21,13 @@ from .services import consume_account_action_token, issue_account_action_token
 logger = logging.getLogger(__name__)
 class AccountActionThrottle(AnonRateThrottle):
     scope = "account_action"
-class RegisterView(generics.CreateAPIView): queryset=User.objects.all(); serializer_class=RegisterSerializer; permission_classes=[permissions.AllowAny]
+class RegisterView(generics.CreateAPIView):
+    queryset=User.objects.all(); serializer_class=RegisterSerializer; permission_classes=[permissions.AllowAny]
+    def create(self, request, *args, **kwargs):
+        from apps.administration.models import PlatformSettings
+        from rest_framework.exceptions import PermissionDenied
+        if not PlatformSettings.get_solo().registration_enabled: raise PermissionDenied("Student registration is currently closed.")
+        return super().create(request, *args, **kwargs)
 class StudentPublicProfileView(generics.RetrieveAPIView):
     queryset = User.objects.filter(is_active=True, is_student_verified=True, is_suspended=False)
     serializer_class = StudentPublicProfileSerializer
@@ -105,7 +111,20 @@ def resend_verification_email(request):
 class VerificationViewSet(viewsets.ModelViewSet):
     serializer_class=StudentVerificationSerializer; permission_classes=[permissions.IsAuthenticated]
     def get_queryset(self): return StudentVerification.objects.filter(user=self.request.user)
-    def perform_create(self, serializer): serializer.save(user=self.request.user)
+    def perform_create(self, serializer):
+        from apps.administration.models import PlatformSettings
+        from django.utils import timezone
+        from rest_framework.exceptions import ValidationError
+        platform = PlatformSettings.get_solo()
+        matric = serializer.validated_data["submitted_matric_number"]
+        if platform.auto_approve_students:
+            if not self.request.user.email_verified: raise ValidationError("Verify your email before automatic student approval.")
+            if User.objects.filter(matric_number__iexact=matric).exclude(pk=self.request.user.pk).exists(): raise ValidationError({"submitted_matric_number": "This matric number is already assigned."})
+            serializer.save(user=self.request.user, status=StudentVerification.Status.APPROVED, reviewed_at=timezone.now())
+            self.request.user.matric_number = matric; self.request.user.is_student_verified = True
+            self.request.user.save(update_fields=("matric_number", "is_student_verified"))
+        else:
+            serializer.save(user=self.request.user)
     def perform_destroy(self, instance):
         if instance.status != StudentVerification.Status.PENDING:
             from rest_framework.exceptions import PermissionDenied

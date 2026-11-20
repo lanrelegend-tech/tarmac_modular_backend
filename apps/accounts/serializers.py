@@ -8,7 +8,7 @@ class UserSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "username", "first_name", "last_name", "email", "email_verified", "matric_number", "department", "faculty", "level", "phone_number", "whatsapp_number", "profile_picture_url", "role", "is_staff", "is_student_verified", "notification_email_enabled", "notification_whatsapp_enabled")
+        fields = ("id", "username", "first_name", "last_name", "email", "email_verified", "date_joined", "matric_number", "department", "faculty", "level", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_student_verified", "notification_email_enabled", "notification_whatsapp_enabled")
         read_only_fields = fields
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
@@ -19,7 +19,7 @@ class StudentPublicProfileSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "username", "first_name", "last_name", "department", "faculty", "level", "is_student_verified", "profile_picture_url")
+        fields = ("id", "username", "first_name", "last_name", "department", "faculty", "level", "campus", "bio", "is_student_verified", "profile_picture_url")
     def get_profile_picture_url(self, obj):
         return f"/api/accounts/profile-image/{obj.pk}/" if obj.profile_picture else None
 class RegisterSerializer(serializers.ModelSerializer):
@@ -34,14 +34,19 @@ class RegisterSerializer(serializers.ModelSerializer):
         return value
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
-        from .services import issue_account_action_token
-        issue_account_action_token(user, AccountActionToken.Purpose.EMAIL_VERIFY)
+        from apps.administration.models import PlatformSettings
+        if PlatformSettings.get_solo().email_verification_required:
+            from .services import issue_account_action_token
+            issue_account_action_token(user, AccountActionToken.Purpose.EMAIL_VERIFY)
+        else:
+            user.email_verified = True
+            user.save(update_fields=("email_verified",))
         return user
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ("first_name", "last_name", "department", "faculty", "level", "phone_number", "whatsapp_number", "profile_picture", "notification_email_enabled", "notification_whatsapp_enabled")
+        fields = ("username", "first_name", "last_name", "department", "faculty", "level", "campus", "bio", "phone_number", "whatsapp_number", "profile_picture", "notification_email_enabled", "notification_whatsapp_enabled")
 
     def validate_profile_picture(self, image):
         if image and image.size > 5 * 1024 * 1024:
@@ -73,6 +78,10 @@ class StudentVerificationSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         user = self.context["request"].user
+        from apps.administration.models import PlatformSettings
+        platform = PlatformSettings.get_solo()
+        if not platform.student_verification_enabled: raise serializers.ValidationError("Student verification is currently disabled by the school.")
+        if platform.require_student_id and not attrs.get("student_id_image") and self.instance is None: raise serializers.ValidationError({"student_id_image": "Upload your student ID card to continue."})
         if self.instance is None and user.is_student_verified:
             raise serializers.ValidationError("Your student account is already verified.")
         if self.instance and self.instance.status != StudentVerification.Status.PENDING:

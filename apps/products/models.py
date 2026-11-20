@@ -10,7 +10,7 @@ class Product(models.Model):
     seller=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="products"); category=models.ForeignKey(Category,on_delete=models.PROTECT,related_name="products")
     title=models.CharField(max_length=160); description=models.TextField(); condition=models.CharField(max_length=20,choices=Condition.choices)
     price=models.DecimalField(max_digits=12,decimal_places=2,validators=[MinValueValidator(0.01)]); negotiable=models.BooleanField(default=False); location=models.CharField(max_length=160)
-    status=models.CharField(max_length=24,choices=Status.choices,default=Status.PENDING_PAYMENT); expires_at=models.DateTimeField(null=True,blank=True)
+    status=models.CharField(max_length=24,choices=Status.choices,default=Status.PENDING_PAYMENT); expires_at=models.DateTimeField(null=True,blank=True); is_featured=models.BooleanField(default=False); featured_until=models.DateTimeField(null=True,blank=True)
     created_at=models.DateTimeField(auto_now_add=True); updated_at=models.DateTimeField(auto_now=True)
     class Meta:
         indexes = [models.Index(fields=("status", "created_at"), name="product_status_created_idx"), models.Index(fields=("status", "expires_at"), name="product_status_expiry_idx"), models.Index(fields=("category", "status"), name="product_category_status_idx")]

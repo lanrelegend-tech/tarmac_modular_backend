@@ -16,6 +16,7 @@ class User(AbstractUser):
     department = models.CharField(max_length=120, blank=True); faculty = models.CharField(max_length=120, blank=True)
     level = models.CharField(max_length=30, blank=True); phone_number = models.CharField(max_length=25, blank=True)
     whatsapp_number = models.CharField(max_length=25, blank=True)
+    campus = models.CharField(max_length=120, blank=True); bio = models.CharField(max_length=200, blank=True)
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT)
     is_student_verified = models.BooleanField(default=False); is_suspended = models.BooleanField(default=False)
@@ -29,7 +30,7 @@ class User(AbstractUser):
 class StudentVerification(models.Model):
     class Status(models.TextChoices): PENDING="pending", "Pending"; APPROVED="approved", "Approved"; REJECTED="rejected", "Rejected"
     user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, related_name="verifications")
-    student_id_image = models.ImageField(upload_to="student_ids/", storage=PrivateStudentIDStorage()); submitted_matric_number = models.CharField(max_length=40)
+    student_id_image = models.ImageField(upload_to="student_ids/", storage=PrivateStudentIDStorage(), blank=True, null=True); submitted_matric_number = models.CharField(max_length=40)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     reviewed_by = models.ForeignKey("accounts.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="verification_reviews")
     reviewer_note = models.TextField(blank=True); created_at = models.DateTimeField(auto_now_add=True); reviewed_at = models.DateTimeField(null=True, blank=True)

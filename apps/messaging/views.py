@@ -1,8 +1,15 @@
 from rest_framework import viewsets,permissions
+from rest_framework.response import Response
+from rest_framework.decorators import action
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from apps.accounts.permissions import IsVerifiedStudent
 from apps.administration.permissions import PlatformFeatureEnabled
-from .models import Conversation,Message
+from django.utils import timezone
+from django.http import FileResponse
+from django.shortcuts import get_object_or_404
+import mimetypes
+from .models import Conversation,Message,MessageAttachment
 from .serializers import ConversationSerializer,MessageSerializer
 class ConversationViewSet(viewsets.ModelViewSet):
     platform_feature = "messaging_enabled"
@@ -14,6 +21,11 @@ class ConversationViewSet(viewsets.ModelViewSet):
         if len(other_users) != 1 or not other_users[0].is_active or other_users[0].is_suspended or not other_users[0].email_verified or not other_users[0].is_student_verified:
             raise ValidationError({"participants": "A conversation must be with exactly one other active, verified student."})
         convo=serializer.save(); convo.participants.add(self.request.user)
+    @action(detail=True, methods=["post"], url_path="mark-read")
+    def mark_read(self, request, pk=None):
+        conversation = self.get_object()
+        conversation.messages.filter(read_at__isnull=True).exclude(sender=request.user).update(read_at=timezone.now())
+        return Response({"conversation": conversation.pk, "read": True})
 class MessageViewSet(viewsets.ModelViewSet):
     platform_feature = "messaging_enabled"
     serializer_class=MessageSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
@@ -33,3 +45,12 @@ class MessageViewSet(viewsets.ModelViewSet):
         if instance.sender_id != self.request.user.id:
             raise PermissionDenied("Only the message sender can delete this message.")
         instance.delete()
+
+@api_view(["GET"])
+@permission_classes([permissions.IsAuthenticated])
+def message_attachment_file(request, attachment_id):
+    attachment = get_object_or_404(MessageAttachment.objects.select_related("message__conversation"), pk=attachment_id)
+    if not attachment.message.conversation.participants.filter(pk=request.user.pk).exists():
+        raise PermissionDenied("You are not a participant in this conversation.")
+    content_type = attachment.content_type or mimetypes.guess_type(attachment.file.name)[0] or "application/octet-stream"
+    return FileResponse(attachment.file.open("rb"), content_type=content_type)

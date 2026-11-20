@@ -1,8 +1,9 @@
 import mimetypes
+from datetime import timedelta
 from django.db.models import Q
 from django.http import FileResponse
 from django.utils import timezone
-from rest_framework import viewsets
+from rest_framework import viewsets, permissions
 from apps.accounts.permissions import IsVerifiedStudent
 from apps.administration.models import PlatformSettings
 from apps.administration.permissions import PlatformFeatureEnabled
@@ -12,11 +13,19 @@ from .models import Category, Product, ProductImage, Favourite
 from .serializers import CategorySerializer, ProductSerializer, ProductImageUploadSerializer, FavouriteSerializer
 from .permissions import VerifiedStudentOrReadOnly
 
-class CategoryViewSet(viewsets.ReadOnlyModelViewSet):
+class CategoryViewSet(viewsets.ModelViewSet):
     platform_feature = "marketplace_enabled"
     queryset=Category.objects.filter(is_active=True)
     serializer_class=CategorySerializer
-    permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
+    def get_permissions(self):
+        if self.request.user and self.request.user.is_staff:
+            return [permissions.IsAdminUser()]
+        return [IsVerifiedStudent(), PlatformFeatureEnabled()]
+
+    def get_queryset(self):
+        if self.request.user and self.request.user.is_staff:
+            return Category.objects.all()
+        return Category.objects.filter(is_active=True, is_allowed_for_sale=True)
 
 class ProductViewSet(viewsets.ModelViewSet):
     platform_feature = "marketplace_enabled"
@@ -28,8 +37,11 @@ class ProductViewSet(viewsets.ModelViewSet):
         return qs.filter(seller=self.request.user)
     def perform_create(self, serializer):
         platform = PlatformSettings.get_solo()
-        status_value = Product.Status.PENDING_PAYMENT if platform.listing_fee_enabled and platform.paystack_enabled else Product.Status.PENDING_REVIEW
-        serializer.save(seller=self.request.user, status=status_value)
+        if not platform.listing_approval_required and not platform.listing_fee_enabled:
+            serializer.save(seller=self.request.user, status=Product.Status.ACTIVE, expires_at=timezone.now() + timedelta(days=30))
+        else:
+            status_value = Product.Status.PENDING_PAYMENT if platform.listing_fee_enabled and platform.paystack_enabled else Product.Status.PENDING_REVIEW
+            serializer.save(seller=self.request.user, status=status_value)
     def perform_update(self, serializer):
         if serializer.instance.seller_id != self.request.user.id:
             raise PermissionDenied("You can only edit your own listing.")

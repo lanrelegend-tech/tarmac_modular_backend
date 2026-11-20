@@ -6,7 +6,12 @@ from .models import Notification
 from .serializers import NotificationSerializer
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class=NotificationSerializer; permission_classes=[IsVerifiedStudent]
+    http_method_names = ["get", "post", "delete", "head", "options"]
     def get_queryset(self): return Notification.objects.filter(user=self.request.user)
+    def destroy(self, request, *args, **kwargs):
+        notification = self.get_object()
+        notification.delete()
+        return Response(status=204)
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):
         notification = self.get_object()

@@ -1,15 +1,15 @@
 import mimetypes
 from django.db import models
 from django.http import FileResponse
-from rest_framework import viewsets
+from rest_framework import viewsets, permissions
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import status
 from apps.accounts.permissions import IsVerifiedStudent
 from apps.administration.permissions import PlatformFeatureEnabled
-from .models import LostFoundReport,ItemMatch,ItemMatchReview
-from .serializers import LostFoundReportSerializer,ItemMatchSerializer
+from .models import LostFoundReport,ItemMatch,ItemMatchReview,ItemClaim
+from .serializers import LostFoundReportSerializer,ItemMatchSerializer,ItemClaimSerializer
 from .services import create_possible_matches
 from apps.notifications.services import notify_user
 class LostFoundReportViewSet(viewsets.ModelViewSet):
@@ -89,3 +89,22 @@ class ItemMatchViewSet(viewsets.ReadOnlyModelViewSet):
                 notify_user(other, "A student confirmed a possible item match", f'Another student confirmed a possible match for "{match.lost_report.title}".',
                             {"kind":"lost_found_match_response", "match_id":match.pk}, f"lost-found-match-response:{match.pk}:{other.pk}")
         return Response({"match_id": match.pk, "decision": review.decision}, status=status.HTTP_200_OK)
+
+class ItemClaimViewSet(viewsets.ModelViewSet):
+    serializer_class = ItemClaimSerializer
+    permission_classes = [IsVerifiedStudent, PlatformFeatureEnabled]
+    platform_feature = "lost_found_enabled"
+    http_method_names = ["get", "post", "head", "options"]
+    def get_queryset(self): return ItemClaim.objects.filter(models.Q(claimant=self.request.user) | models.Q(report__reporter=self.request.user)).select_related("report", "claimant")
+    def perform_create(self, serializer):
+        report = serializer.validated_data["report"]
+        if report.reporter_id == self.request.user.pk:
+            raise PermissionDenied("You cannot claim your own found-item report.")
+        claim = serializer.save(claimant=self.request.user, evidence_name=serializer.validated_data.get("evidence").name if serializer.validated_data.get("evidence") else "")
+        notify_user(report.reporter, "A student submitted an item claim", f'A student has submitted a claim for "{report.title}". School staff will review it.', {"kind":"item_claim", "claim_id":claim.pk}, f"item-claim:{claim.pk}:finder")
+    @action(detail=True, methods=["get"], url_path="evidence")
+    def evidence_file(self, request, pk=None):
+        claim = self.get_object()
+        if not claim.evidence: raise PermissionDenied("No evidence is attached to this claim.")
+        content_type = mimetypes.guess_type(claim.evidence.name)[0] or "application/octet-stream"
+        return FileResponse(claim.evidence.open("rb"), content_type=content_type)

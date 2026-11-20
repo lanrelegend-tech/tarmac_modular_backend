@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import time
+from datetime import timedelta
 
 from django.db import transaction
 from django.utils import timezone
@@ -12,6 +13,7 @@ from rest_framework.response import Response
 
 from apps.products.models import Product
 from apps.ads.models import AdCampaign
+from apps.administration.models import StudentSubscription, PlatformSettings
 from apps.notifications.services import notify_user
 from .models import Payment
 
@@ -66,7 +68,7 @@ def paystack_webhook(request):
         return Response({"received": True})
     with transaction.atomic():
         try:
-            payment = Payment.objects.select_for_update().select_related("product").get(reference=reference)
+            payment = Payment.objects.select_for_update().select_related("product", "advertisement__package", "subscription_plan").get(reference=reference)
         except Payment.DoesNotExist:
             return Response({"received": True})
         if payment.status == Payment.Status.SUCCESS:
@@ -83,13 +85,19 @@ def paystack_webhook(request):
         payment.provider_response = {"transaction_id": data.get("id"), "status": data.get("status"), "amount": data.get("amount"), "currency": data.get("currency")}
         payment.save(update_fields=("status", "paid_at", "provider_response"))
         if payment.product_id and payment.product.status == Product.Status.PENDING_PAYMENT:
-            payment.product.status = Product.Status.PENDING_REVIEW
-            payment.product.save(update_fields=("status", "updated_at"))
-            notify_user(payment.user, "Listing payment received", f"Your listing '{payment.product.title}' is awaiting school review.",
+            platform = PlatformSettings.get_solo()
+            payment.product.status = Product.Status.PENDING_REVIEW if platform.listing_approval_required else Product.Status.ACTIVE
+            if not platform.listing_approval_required: payment.product.expires_at = timezone.now() + timedelta(days=30)
+            payment.product.save(update_fields=("status", "expires_at", "updated_at"))
+            notify_user(payment.user, "Listing payment received", f"Your listing '{payment.product.title}' is " + ("awaiting school review." if platform.listing_approval_required else "now active."),
                         {"kind": "listing_review", "product_id": payment.product_id, "title": payment.product.title}, f"listing-review:{payment.product_id}")
         elif payment.advertisement_id and payment.advertisement.status == AdCampaign.Status.PENDING_PAYMENT:
             payment.advertisement.status = AdCampaign.Status.PENDING_REVIEW
             payment.advertisement.save(update_fields=("status", "updated_at"))
             notify_user(payment.user, "Ad payment received", f"Your ad '{payment.advertisement.title}' is awaiting school review.",
                         {"kind": "ad_review", "title": payment.advertisement.title}, f"ad-review:{payment.advertisement_id}")
+        elif payment.subscription_plan_id:
+            subscription, created = StudentSubscription.objects.get_or_create(payment_reference=payment.reference, defaults={"user": payment.user, "plan": payment.subscription_plan, "amount_kobo": payment.amount_kobo, "ends_at": timezone.now() + timedelta(days=payment.subscription_plan.duration_days)})
+            if created:
+                notify_user(payment.user, "Subscription activated", f"Your {payment.subscription_plan.name} subscription is active.", {"kind":"subscription_activated", "subscription_id":subscription.pk}, f"subscription-activated:{subscription.pk}")
     return Response({"received": True})
