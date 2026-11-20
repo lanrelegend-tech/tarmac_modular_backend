@@ -6,6 +6,7 @@ from django.utils import timezone
 from apps.notifications.services import notify_user
 from apps.payments.models import Payment
 from apps.administration.models import PlatformSettings
+from apps.accounts.permissions import is_student_feature_eligible
 from .models import Category, Product, ProductImage, Favourite
 
 
@@ -31,7 +32,7 @@ class ProductAdmin(admin.ModelAdmin):
         fee_required = settings.listing_fee_enabled and settings.paystack_enabled
         for product in queryset.select_related("seller", "category"):
             has_paid = Payment.objects.filter(product=product, status=Payment.Status.SUCCESS).exists()
-            eligible = product.seller.is_active and product.seller.is_student_verified and not product.seller.is_suspended
+            eligible = is_student_feature_eligible(product.seller)
             category_allowed = product.category.is_active and product.category.is_allowed_for_sale
             if product.status != Product.Status.PENDING_REVIEW or (fee_required and not has_paid) or not eligible or not category_allowed:
                 continue

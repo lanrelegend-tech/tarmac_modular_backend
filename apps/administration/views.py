@@ -8,13 +8,15 @@ from rest_framework import viewsets,permissions, status, generics
 from rest_framework.decorators import action, api_view, permission_classes as drf_permission_classes
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from django.db import models
 from django.db.models import Count, Sum
 from django.db.models.functions import TruncDate
 from django.db.models import Prefetch
 from django.utils import timezone
 from apps.accounts.permissions import IsVerifiedStudent
-from apps.accounts.models import User
+from apps.accounts.permissions import is_student_feature_eligible
+from apps.accounts.models import User, ProfileChangeRequest, ProfileChangeMessage
 from apps.accounts.models import StudentVerification
 from apps.reviews.models import SellerReview
 from apps.products.models import Product
@@ -22,8 +24,10 @@ from apps.payments.models import Payment
 from apps.lost_found.models import LostFoundReport, ItemMatch, ItemClaim
 from apps.ads.models import AdCampaign
 from apps.messaging.models import Conversation, Message
+from apps.messaging.serializers import MessageSerializer
 from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
 from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminAccountSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
+from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
 from apps.notifications.services import notify_user
 class UserReportViewSet(viewsets.ModelViewSet):
     serializer_class=UserReportSerializer
@@ -153,7 +157,7 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
         status_value = serializer.validated_data["status"]
         user = User.objects.select_for_update().get(pk=verification.user_id)
         if status_value == StudentVerification.Status.APPROVED:
-            if not user.email_verified:
+            if PlatformSettings.get_solo().email_verification_required and not user.email_verified:
                 raise ValidationError({"status": "The student must verify their email before approval."})
             duplicate = User.objects.filter(matric_number=verification.submitted_matric_number).exclude(pk=user.pk).exists()
             if duplicate:
@@ -201,14 +205,95 @@ class AdminAccountViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         account = serializer.save()
+        if account.is_suspended or not account.is_active:
+            for outstanding in OutstandingToken.objects.filter(user=account):
+                BlacklistedToken.objects.get_or_create(token=outstanding)
         AdminLog.objects.create(actor=self.request.user, action="student_account_updated", target_type="User", target_id=str(account.pk), metadata={"is_active": account.is_active, "is_suspended": account.is_suspended})
+
+
+class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
+    serializer_class = AdminProfileChangeRequestSerializer
+    permission_classes = [permissions.IsAdminUser]
+    http_method_names = ["get", "patch", "head", "options"]
+    filterset_fields = ["status"]
+
+    def get_queryset(self):
+        return ProfileChangeRequest.objects.select_related("user", "reviewed_by").prefetch_related("messages__sender").all()
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        change_request = ProfileChangeRequest.objects.select_for_update().select_related("user").get(pk=serializer.instance.pk)
+        if change_request.status not in (ProfileChangeRequest.Status.PENDING, ProfileChangeRequest.Status.NEEDS_INFO):
+            raise ValidationError({"status": "This request has already been reviewed."})
+        next_status = serializer.validated_data.get("status")
+        if next_status not in (ProfileChangeRequest.Status.APPROVED, ProfileChangeRequest.Status.REJECTED):
+            raise ValidationError({"status": "Choose approve or reject after review."})
+        if next_status == ProfileChangeRequest.Status.APPROVED:
+            account = User.objects.select_for_update().get(pk=change_request.user_id)
+            requested_changes = dict(change_request.requested_changes)
+            requested_email = requested_changes.pop("email", None)
+            requested_matric = requested_changes.pop("matric_number", None)
+            if requested_email and User.objects.filter(email__iexact=requested_email).exclude(pk=account.pk).exists():
+                raise ValidationError({"email": "Another account now uses the requested email address."})
+            if requested_changes:
+                profile_serializer = ProfileUpdateSerializer(account, data=requested_changes, partial=True)
+                profile_serializer.is_valid(raise_exception=True)
+                profile_serializer.save()
+            if requested_email:
+                account.email = requested_email
+                account.email_verified = False
+                account.save(update_fields=("email", "email_verified"))
+                from apps.accounts.services import issue_account_action_token
+                from apps.accounts.models import AccountActionToken
+                AccountActionToken.objects.filter(user=account, purpose=AccountActionToken.Purpose.PASSWORD_RESET, used_at__isnull=True).update(used_at=timezone.now())
+                issue_account_action_token(account, AccountActionToken.Purpose.EMAIL_VERIFY)
+            if requested_matric:
+                if User.objects.filter(matric_number__iexact=requested_matric).exclude(pk=account.pk).exists() or StudentVerification.objects.filter(submitted_matric_number__iexact=requested_matric).exclude(user=account).exists():
+                    raise ValidationError({"matric_number": "Another account now uses this matriculation number."})
+                account.matric_number = requested_matric
+                account.is_student_verified = False
+                account.save(update_fields=("matric_number", "is_student_verified"))
+            if change_request.requested_profile_picture:
+                account.profile_picture = change_request.requested_profile_picture
+                account.save(update_fields=("profile_picture",))
+        change_request.status = next_status
+        change_request.reviewed_by = self.request.user
+        change_request.reviewed_at = timezone.now()
+        change_request.save(update_fields=("status", "reviewed_by", "reviewed_at", "updated_at"))
+        change_request.user.refresh_from_db()
+        AdminLog.objects.create(actor=self.request.user, action=f"profile_change_request_{next_status}", target_type="ProfileChangeRequest", target_id=str(change_request.pk), metadata={"user_id": change_request.user_id, "changed_fields": list(change_request.requested_changes)})
+        notify_user(change_request.user, "Profile change request reviewed", "Your profile change request was " + ("approved and applied." if next_status == ProfileChangeRequest.Status.APPROVED else "declined. Open your profile to see the review conversation."), {"kind": "profile_change_review", "request_id": change_request.pk, "status": next_status}, f"profile-change-review:{change_request.pk}:{next_status}")
+        serializer.instance = change_request
+
+    @action(detail=True, methods=["post"])
+    def question(self, request, pk=None):
+        change_request = self.get_object()
+        if change_request.status not in (ProfileChangeRequest.Status.PENDING, ProfileChangeRequest.Status.NEEDS_INFO):
+            raise ValidationError("This request has already been reviewed.")
+        body = str(request.data.get("body", "")).strip()
+        if len(body) < 2 or len(body) > 3000:
+            raise ValidationError({"body": "Write a question between 2 and 3000 characters."})
+        ProfileChangeMessage.objects.create(request=change_request, sender=request.user, body=body)
+        change_request.status = ProfileChangeRequest.Status.NEEDS_INFO
+        change_request.save(update_fields=("status", "updated_at"))
+        notify_user(change_request.user, "Admin has a question about your profile request", body, {"kind": "profile_change_question", "request_id": change_request.pk}, f"profile-change-question:{change_request.pk}:{change_request.messages.count()}")
+        return Response(self.get_serializer(change_request).data)
+
+    @action(detail=True, methods=["get"], url_path="image")
+    def image(self, request, pk=None):
+        change_request = self.get_object()
+        if not change_request.requested_profile_picture:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("No profile picture was included in this request.")
+        content_type = mimetypes.guess_type(change_request.requested_profile_picture.name)[0] or "application/octet-stream"
+        return FileResponse(change_request.requested_profile_picture.open("rb"), content_type=content_type)
 
 class AdminConversationViewSet(viewsets.GenericViewSet):
     serializer_class = AdminConversationSerializer
     permission_classes = [permissions.IsAdminUser]
     http_method_names = ["get", "patch", "post", "head", "options"]
     def get_queryset(self):
-        latest_messages = Message.objects.select_related("sender").order_by("-created_at")[:50]
+        latest_messages = Message.objects.select_related("sender").prefetch_related("attachments").order_by("-created_at")[:50]
         return Conversation.objects.annotate(unread_count=Count("messages", filter=models.Q(messages__sender__is_staff=False, messages__read_at__isnull=True))).prefetch_related("participants", Prefetch("messages", queryset=latest_messages, to_attr="recent_messages")).order_by("-updated_at")
     def list(self, request):
         queryset = self.get_queryset()
@@ -231,10 +316,14 @@ class AdminConversationViewSet(viewsets.GenericViewSet):
     def reply(self, request, pk=None):
         conversation = self.get_object()
         body = str(request.data.get("body", "")).strip()
-        if not body or len(body) > 5000: raise ValidationError({"body": "Enter a message up to 5,000 characters."})
-        message = Message.objects.create(conversation=conversation, sender=request.user, body=body)
+        uploads = request.FILES.getlist("attachment_files")
+        serializer = MessageSerializer(data={"conversation": conversation.pk, "body": body, "attachment_files": uploads}, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        message = serializer.save(sender=request.user)
+        if not conversation.is_official:
+            conversation.is_official = True
         conversation.status = Conversation.Status.OPEN
-        conversation.save(update_fields=("status", "updated_at"))
+        conversation.save(update_fields=("is_official", "status", "updated_at"))
         for student in conversation.participants.filter(is_staff=False):
             notify_user(student, "New message from Tarmac administration", body[:240], {"kind":"admin_conversation_reply", "conversation_id":conversation.pk}, f"admin-conversation-reply:{message.pk}:{student.pk}")
         AdminLog.objects.create(actor=request.user, action="conversation_admin_reply", target_type="Conversation", target_id=str(conversation.pk), metadata={"message_id":message.pk})
@@ -297,20 +386,34 @@ def analytics(request):
 
 @api_view(["POST"])
 @drf_permission_classes([permissions.IsAdminUser])
+@transaction.atomic
 def send_admin_message(request):
     email = str(request.data.get("email", "")).strip().lower()
     subject = str(request.data.get("subject", "")).strip()
     body = str(request.data.get("body", "")).strip()
-    if not email or not subject or not body:
-        raise ValidationError({"detail": "Student email, title, and message are required."})
+    uploads = request.FILES.getlist("attachment_files")
+    if not email or not subject or (not body and not uploads):
+        raise ValidationError({"detail": "Student email and title are required, with a message or attachment."})
     if len(subject) > 180 or len(body) > 5000:
         raise ValidationError({"detail": "Message title must be 180 characters or fewer and message 5,000 or fewer."})
-    user = User.objects.filter(email__iexact=email, is_active=True, is_suspended=False, is_student_verified=True).first()
-    if user is None:
-        raise ValidationError({"email": "No active verified student was found with this email."})
-    notify_user(user, subject, body, {"kind": "admin_message", "display": "popup"}, f"admin-message:{uuid.uuid4().hex}")
+    user = User.objects.filter(email__iexact=email, is_active=True, is_suspended=False).first()
+    if not is_student_feature_eligible(user):
+        raise ValidationError({"email": "No active eligible student account was found with this email."})
+    conversation = Conversation.objects.annotate(participant_count=Count("participants", distinct=True)).filter(
+        context_type=Conversation.ContextType.OFFICIAL, is_official=True, participant_count=2, participants=request.user
+    ).filter(participants=user).first()
+    if conversation is None:
+        conversation = Conversation.objects.create(context_type=Conversation.ContextType.OFFICIAL, context_title=subject[:180], is_official=True)
+        conversation.participants.add(request.user, user)
+    serializer = MessageSerializer(data={"conversation": conversation.pk, "body": f"{subject}\n\n{body}".strip(), "attachment_files": uploads}, context={"request": request})
+    serializer.is_valid(raise_exception=True)
+    message = serializer.save(sender=request.user)
+    conversation.is_official = True
+    conversation.context_title = subject[:180]
+    conversation.save(update_fields=("is_official", "context_title", "updated_at"))
+    notify_user(user, "Official message from Tarmac", body[:240] or subject, {"kind": "admin_conversation_reply", "conversation_id": conversation.pk, "is_official": True}, f"admin-message:{message.pk}:{user.pk}")
     AdminLog.objects.create(actor=request.user, action="student_message_sent", target_type="User", target_id=str(user.pk), metadata={"email": user.email})
-    return Response({"sent": True, "student": user.email})
+    return Response({"sent": True, "student": user.email, "conversation_id": conversation.pk}, status=status.HTTP_201_CREATED)
 
 from rest_framework.permissions import AllowAny
 
@@ -319,6 +422,13 @@ from rest_framework.permissions import AllowAny
 def system_status(request):
     config = PlatformSettings.get_solo()
     return Response({
+        "site": {
+            "name": config.site_name,
+            "tagline": config.tagline,
+            "logo_url": request.build_absolute_uri("/api/system/logo/") if config.site_logo else "",
+            "support_email": config.support_email,
+            "contact_email": config.contact_email,
+        },
         "maintenance_mode": config.maintenance_mode,
         "maintenance_message": config.maintenance_message if config.maintenance_mode else "",
         "features": {
@@ -326,6 +436,21 @@ def system_status(request):
             "lost_found": config.lost_found_enabled,
             "messaging": config.messaging_enabled,
             "ads": config.ads_enabled,
+            "ad_slide_duration_seconds": config.ad_slide_duration_seconds,
+            "homepage_ads": config.homepage_ads_enabled,
+            "marketplace_ads": config.marketplace_ads_enabled,
+            "homepage_lost_found": config.homepage_lost_found_enabled,
+            "featured_products": config.featured_products_enabled,
+            "reviews": config.reviews_enabled,
+            "announcements": config.announcements_enabled,
+            "student_verification": config.student_verification_enabled,
+            "email_verification": config.email_verification_required,
+            "registration": config.registration_enabled,
+        },
+        "listing": {
+            "approval_required": config.listing_approval_required,
+            "max_images": config.max_product_images,
+            "require_student_id": config.require_student_id,
         },
         "fees": {
             "listing_fee_required": config.listing_fee_enabled and config.paystack_enabled,
@@ -334,7 +459,29 @@ def system_status(request):
             "ad_fee_kobo": config.ad_fee_kobo if config.ad_fee_enabled and config.paystack_enabled else 0,
             "payments_enabled": config.paystack_enabled,
         },
+        "sponsorship": {
+            "enabled": config.sponsored_products_enabled,
+            "fee_required": config.sponsored_product_fee_enabled and config.paystack_enabled,
+            "fee_kobo": config.sponsored_product_fee_kobo if config.sponsored_product_fee_enabled and config.paystack_enabled else 0,
+            "duration_days": config.sponsored_product_duration_days,
+        },
+        "policies": {
+            "terms": config.terms_text,
+            "privacy": config.privacy_text,
+            "community_guidelines": config.community_guidelines_text,
+        },
     })
+
+
+@api_view(["GET"])
+@drf_permission_classes([AllowAny])
+def system_logo(request):
+    config = PlatformSettings.get_solo()
+    if not config.site_logo:
+        from rest_framework.exceptions import NotFound
+        raise NotFound("The site logo has not been set.")
+    content_type = mimetypes.guess_type(config.site_logo.name)[0] or "application/octet-stream"
+    return FileResponse(config.site_logo.open("rb"), content_type=content_type)
 
 class SupportTicketViewSet(viewsets.ModelViewSet):
     serializer_class = SupportTicketSerializer
@@ -426,7 +573,8 @@ class PlatformSettingsView(generics.RetrieveUpdateAPIView):
         return PlatformSettings.get_solo()
     def perform_update(self, serializer):
         settings_obj = serializer.save()
-        AdminLog.objects.create(actor=self.request.user, action="platform_settings_updated", target_type="PlatformSettings", target_id="1", metadata={key: getattr(settings_obj, key) for key in ("maintenance_mode", "marketplace_enabled", "lost_found_enabled", "messaging_enabled", "ads_enabled", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled")})
+        changed_fields = tuple(key for key in serializer.validated_data if key != "site_logo")
+        AdminLog.objects.create(actor=self.request.user, action="platform_settings_updated", target_type="PlatformSettings", target_id="1", metadata={key: getattr(settings_obj, key) for key in changed_fields})
 
 class AdminPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AdminPaymentSerializer
@@ -509,17 +657,19 @@ class AdminProductViewSet(viewsets.ModelViewSet):
         next_status = serializer.validated_data.get("status", product.status)
         if "is_featured" in serializer.validated_data:
             product.is_featured = serializer.validated_data["is_featured"]
-            product.featured_until = timezone.now() + timedelta(days=30) if product.is_featured else None
+            product.featured_until = timezone.now() + timedelta(days=product.sponsorship_duration_days if product.sponsor_requested else PlatformSettings.get_solo().sponsored_product_duration_days) if product.is_featured else None
+        if "featured_position" in serializer.validated_data:
+            product.featured_position = serializer.validated_data["featured_position"]
             AdminLog.objects.create(actor=self.request.user, action="marketplace_listing_featured" if product.is_featured else "marketplace_listing_unfeatured", target_type="Product", target_id=str(product.pk), metadata={"seller_id": product.seller_id})
         if next_status == Product.Status.PENDING_REVIEW and product.status == Product.Status.REMOVED:
             product.status = Product.Status.PENDING_REVIEW
-            product.save(update_fields=("status", "is_featured", "featured_until", "updated_at"))
+            product.save(update_fields=("status", "is_featured", "featured_until", "featured_position", "updated_at"))
             AdminLog.objects.create(actor=self.request.user, action="marketplace_listing_restored_for_review", target_type="Product", target_id=str(product.pk), metadata={"seller_id": product.seller_id})
             serializer.instance = product
             return
         if next_status == Product.Status.ACTIVE:
             platform = PlatformSettings.get_solo()
-            payment_required = platform.listing_fee_enabled and platform.paystack_enabled
+            payment_required = platform.paystack_enabled and ((platform.listing_fee_enabled and platform.listing_fee_kobo > 0) or (product.sponsor_requested and platform.sponsored_product_fee_enabled and product.sponsorship_fee_kobo > 0))
             paid = Payment.objects.filter(product=product, status=Payment.Status.SUCCESS).exists()
             if product.status != Product.Status.PENDING_REVIEW:
                 raise ValidationError({"status": "Only listings pending review can be approved."})
@@ -527,12 +677,15 @@ class AdminProductViewSet(viewsets.ModelViewSet):
                 raise ValidationError({"payment": "A successful listing payment is required before approval."})
             product.status = Product.Status.ACTIVE
             product.expires_at = timezone.now() + timedelta(days=30)
-            product.save(update_fields=("status", "expires_at", "is_featured", "featured_until", "updated_at"))
+            if product.sponsor_requested and platform.sponsored_products_enabled:
+                product.is_featured = True
+                product.featured_until = timezone.now() + timedelta(days=product.sponsorship_duration_days)
+            product.save(update_fields=("status", "expires_at", "is_featured", "featured_until", "featured_position", "updated_at"))
         elif next_status == Product.Status.REMOVED:
             product.status = Product.Status.REMOVED
-            product.save(update_fields=("status", "is_featured", "featured_until", "updated_at"))
+            product.save(update_fields=("status", "is_featured", "featured_until", "featured_position", "updated_at"))
         elif next_status == product.status:
-            product.save(update_fields=("is_featured", "featured_until", "updated_at"))
+            product.save(update_fields=("is_featured", "featured_until", "featured_position", "updated_at"))
         else:
             raise ValidationError({"status": "Choose active to approve or removed to reject a pending listing."})
         AdminLog.objects.create(actor=self.request.user, action=f"marketplace_listing_{product.status}", target_type="Product", target_id=str(product.pk), metadata={"seller_id": product.seller_id})

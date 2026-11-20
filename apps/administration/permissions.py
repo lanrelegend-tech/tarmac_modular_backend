@@ -10,3 +10,5 @@ class PlatformFeatureEnabled(BasePermission):
         if not feature or getattr(PlatformSettings.get_solo(), feature, False):
             return True
         raise FeatureUnavailable("This feature is currently disabled by the school administrator.")
+
+

@@ -42,24 +42,27 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         platform = PlatformSettings.get_solo()
         if not platform.marketplace_enabled:
             raise FeatureUnavailable("The marketplace is currently disabled.")
-        if not platform.listing_fee_enabled:
-            raise ValidationError({"product": "Listing fees are currently disabled; submit the listing for free."})
         if not platform.paystack_enabled:
             raise FeatureUnavailable("Paystack payments are currently disabled.")
+        listing_fee = platform.listing_fee_kobo if platform.listing_fee_enabled else 0
+        sponsor_fee = product.sponsorship_fee_kobo if product.sponsor_requested and platform.sponsored_product_fee_enabled else 0
+        amount_kobo = listing_fee + sponsor_fee
+        if amount_kobo <= 0:
+            raise ValidationError({"product": "No payment is due for this listing."})
         secret = os.getenv("PAYSTACK_SECRET_KEY")
         if not secret:
             raise APIException("Listing payments are not configured. Contact the site administrator.")
         existing = Payment.objects.filter(product=product, status=Payment.Status.INITIALIZED).order_by("-created_at").first()
         if existing and existing.provider_response.get("data", {}).get("authorization_url"):
             return Response({"reference": existing.reference, "authorization_url": existing.provider_response["data"]["authorization_url"]})
-        payment = Payment.objects.create(user=request.user, product=product, amount_kobo=platform.listing_fee_kobo)
+        payment = Payment.objects.create(user=request.user, product=product, amount_kobo=amount_kobo)
         callback_url = os.getenv("PAYSTACK_CALLBACK_URL", "")
         payload = {
             "email": request.user.email,
             "amount": payment.amount_kobo,
             "currency": payment.currency,
             "reference": payment.reference,
-            "metadata": {"product_id": product.pk, "user_id": request.user.pk},
+            "metadata": {"product_id": product.pk, "user_id": request.user.pk, "listing_fee_kobo": listing_fee, "sponsorship_fee_kobo": sponsor_fee},
         }
         if callback_url:
             payload["callback_url"] = callback_url

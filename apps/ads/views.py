@@ -1,7 +1,9 @@
 import mimetypes
 
 from django.http import FileResponse
-from django.db.models import F
+from django.db.models import F, Q, CharField, Value
+from django.db.models.functions import Cast
+from django.db.models.lookups import IContains
 from django.shortcuts import redirect
 from django.utils import timezone
 from datetime import timedelta
@@ -11,7 +13,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
-from apps.accounts.permissions import IsVerifiedStudent
+from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.models import PlatformSettings
 from apps.administration.permissions import PlatformFeatureEnabled
 from .models import AdCampaign, AdImpression
@@ -24,6 +26,8 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
     permission_classes = (IsVerifiedStudent, PlatformFeatureEnabled)
 
     def get_permissions(self):
+        if getattr(self, "action", None) in ("list", "retrieve", "image_file", "click"):
+            return [permissions.AllowAny(), PlatformFeatureEnabled()]
         if getattr(self, "action", None) in ("approve", "reject", "pause"):
             return [permissions.IsAdminUser()]
         if self.request.user and self.request.user.is_staff:
@@ -37,7 +41,30 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         active = AdCampaign.objects.filter(status=AdCampaign.Status.ACTIVE).filter(
             models_q_start(now), models_q_end(now)
         )
-        return active | AdCampaign.objects.filter(advertiser=self.request.user)
+        surface = self.request.query_params.get("surface")
+        platform = PlatformSettings.get_solo()
+        surface_flags = {
+            "home": (platform.homepage_ads_enabled, "homepage"),
+            "homepage": (platform.homepage_ads_enabled, "homepage"),
+            "announcements": (platform.homepage_ads_enabled, "announcements"),
+            "marketplace": (platform.marketplace_ads_enabled, "marketplace"),
+            "lost-found": (platform.lost_found_enabled, "lost_found"),
+            "lost_found": (platform.lost_found_enabled, "lost_found"),
+        }
+        if surface and surface not in surface_flags:
+            return AdCampaign.objects.none()
+        if surface in surface_flags:
+            is_enabled, page_value = surface_flags[surface]
+            if not is_enabled:
+                return AdCampaign.objects.none()
+            # Cast JSON to text so placement filtering works on SQLite in local
+            # development as well as PostgreSQL in production.
+            page_text = Cast("pages", output_field=CharField())
+            active = active.filter(Q(IContains(page_text, Value(f'"{page_value}"'))))
+            return active
+        if self.request.user.is_authenticated:
+            return active | AdCampaign.objects.filter(advertiser=self.request.user)
+        return active
 
     def perform_create(self, serializer):
         platform = PlatformSettings.get_solo()
@@ -46,8 +73,9 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             from django.utils import timezone as django_timezone
             package = serializer.validated_data.get("package")
             start = serializer.validated_data.get("starts_at") or django_timezone.now()
-            end = serializer.validated_data.get("ends_at") or start + timedelta(days=package.duration_days if package else 30)
-            campaign = serializer.save(status=AdCampaign.Status.ACTIVE, starts_at=start, ends_at=end, price_kobo=serializer.validated_data.get("price_kobo", package.price_kobo if package else 0), pages=serializer.validated_data.get("pages") or [serializer.validated_data.get("placement", "marketplace")])
+            duration_days = package.duration_days if package else 30
+            end = serializer.validated_data.get("ends_at") or start + timedelta(days=duration_days)
+            campaign = serializer.save(status=AdCampaign.Status.ACTIVE, starts_at=start, ends_at=end, duration_days=duration_days, price_kobo=serializer.validated_data.get("price_kobo", package.price_kobo if package else 0))
             AdminLog.objects.create(actor=self.request.user, action="admin_ad_campaign_created", target_type="AdCampaign", target_id=str(campaign.pk), metadata={"advertiser_id": campaign.advertiser_id, "price_kobo": campaign.price_kobo})
             return
         package = serializer.validated_data.get("package")
@@ -55,7 +83,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             raise ValidationError({"package": "Choose an active advertising package."})
         needs_payment = platform.ad_fee_enabled and platform.paystack_enabled and package.price_kobo > 0
         initial_status = AdCampaign.Status.PENDING_PAYMENT if needs_payment else AdCampaign.Status.PENDING_REVIEW
-        serializer.save(advertiser=self.request.user, status=initial_status, price_kobo=package.price_kobo)
+        serializer.save(advertiser=self.request.user, status=initial_status, price_kobo=package.price_kobo, duration_days=package.duration_days)
 
     def perform_update(self, serializer):
         if not self.request.user.is_staff and serializer.instance.advertiser_id != self.request.user.id:
@@ -85,16 +113,16 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         platform = PlatformSettings.get_solo()
         from apps.payments.models import Payment
         payment_required = platform.ad_fee_enabled and platform.paystack_enabled and campaign.price_kobo > 0
-        paid = Payment.objects.filter(advertisement=campaign, status=Payment.Status.SUCCESS).exists()
+        paid = Payment.objects.filter(advertisement=campaign, status=Payment.Status.SUCCESS, amount_kobo=campaign.price_kobo).exists()
         if campaign.status != AdCampaign.Status.PENDING_REVIEW:
             raise ValidationError({"status": "Only campaigns awaiting review can be approved."})
         if payment_required and not paid:
             raise ValidationError({"payment": "A successful payment is required before approval."})
-        if not campaign.advertiser.is_active or campaign.advertiser.is_suspended or not campaign.advertiser.is_student_verified:
-            raise ValidationError({"advertiser": "The campaign owner must be an active verified student."})
+        if not is_student_feature_eligible(campaign.advertiser):
+            raise ValidationError({"advertiser": "The campaign owner must have an active student account and verified email."})
         campaign.status = AdCampaign.Status.ACTIVE
         campaign.starts_at = timezone.now()
-        campaign.ends_at = campaign.starts_at + timedelta(days=campaign.package.duration_days if campaign.package_id else 30)
+        campaign.ends_at = campaign.starts_at + timedelta(days=campaign.duration_days)
         campaign.save(update_fields=("status", "starts_at", "ends_at", "updated_at"))
         if campaign.package_id:
             successful_payment = Payment.objects.filter(advertisement=campaign, status=Payment.Status.SUCCESS).order_by("-paid_at").first()
@@ -135,7 +163,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             raise ValidationError({"status": "Only paused campaigns can be reactivated."})
         now = timezone.now()
         if campaign.ends_at and campaign.ends_at <= now:
-            campaign.ends_at = now + timedelta(days=campaign.package.duration_days if campaign.package_id else 30)
+            campaign.ends_at = now + timedelta(days=campaign.duration_days)
         campaign.status = AdCampaign.Status.ACTIVE
         campaign.starts_at = now
         campaign.save(update_fields=("status", "starts_at", "ends_at", "updated_at"))

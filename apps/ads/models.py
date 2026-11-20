@@ -13,8 +13,10 @@ class AdCampaign(models.Model):
         ENDED = "ended", "Ended"
 
     class Placement(models.TextChoices):
+        HOMEPAGE = "homepage", "Homepage"
         MARKETPLACE = "marketplace", "Marketplace"
         LOST_FOUND = "lost_found", "Lost and found"
+        ANNOUNCEMENTS = "announcements", "Announcements"
 
     advertiser = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="ad_campaigns")
     package = models.ForeignKey("administration.SubscriptionPlan", null=True, blank=True, on_delete=models.SET_NULL, related_name="ad_campaigns")
@@ -22,6 +24,7 @@ class AdCampaign(models.Model):
     pages = models.JSONField(default=list, blank=True)
     display_image = models.CharField(max_length=500, blank=True)
     price_kobo = models.PositiveIntegerField(default=0)
+    duration_days = models.PositiveSmallIntegerField(default=30)
     title = models.CharField(max_length=120)
     description = models.CharField(max_length=240, blank=True)
     image = models.ImageField(upload_to="ads/", validators=[FileExtensionValidator(("jpg", "jpeg", "png", "webp"))], blank=True, null=True)

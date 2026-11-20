@@ -4,6 +4,7 @@ from django.contrib import admin, messages
 from django.utils import timezone
 
 from apps.administration.models import PlatformSettings
+from apps.accounts.permissions import is_student_feature_eligible
 from apps.administration.models import StudentSubscription
 from apps.notifications.services import notify_user
 from apps.payments.models import Payment
@@ -18,25 +19,25 @@ class AdCampaignAdmin(admin.ModelAdmin):
     readonly_fields = ("advertiser", "status", "created_at", "updated_at")
     actions = ("approve_campaigns", "pause_campaigns", "reject_campaigns")
 
-    @admin.action(description="Approve paid (or free) campaigns for 30 days")
+    @admin.action(description="Approve eligible paid or free campaigns")
     def approve_campaigns(self, request, queryset):
         settings = PlatformSettings.get_solo()
         fee_required = settings.ad_fee_enabled and settings.paystack_enabled
         approved = 0
         for ad in queryset.select_related("advertiser"):
-            paid = Payment.objects.filter(advertisement=ad, status=Payment.Status.SUCCESS).exists()
+            paid = Payment.objects.filter(advertisement=ad, status=Payment.Status.SUCCESS, amount_kobo=ad.price_kobo).exists()
             if ad.status != AdCampaign.Status.PENDING_REVIEW or (fee_required and ad.price_kobo > 0 and not paid):
                 continue
-            if not ad.advertiser.is_active or ad.advertiser.is_suspended or not ad.advertiser.is_student_verified:
+            if not is_student_feature_eligible(ad.advertiser):
                 continue
             ad.status = AdCampaign.Status.ACTIVE
             ad.starts_at = timezone.now()
-            ad.ends_at = ad.starts_at + timedelta(days=ad.package.duration_days if ad.package_id else 30)
+            ad.ends_at = ad.starts_at + timedelta(days=ad.duration_days)
             ad.save(update_fields=("status", "starts_at", "ends_at", "updated_at"))
             if ad.package_id:
                 successful_payment = Payment.objects.filter(advertisement=ad, status=Payment.Status.SUCCESS).order_by("-paid_at").first()
                 StudentSubscription.objects.get_or_create(ad_campaign=ad, defaults={"user": ad.advertiser, "plan": ad.package, "amount_kobo": successful_payment.amount_kobo if successful_payment else 0, "payment_reference": successful_payment.reference if successful_payment else None, "starts_at": ad.starts_at, "ends_at": ad.ends_at})
-            notify_user(ad.advertiser, "Ad campaign approved", f"Your ad '{ad.title}' is now active for 30 days.",
+            notify_user(ad.advertiser, "Ad campaign approved", f"Your ad '{ad.title}' is now active for {ad.duration_days} days.",
                         {"kind": "ad_approved", "title": ad.title}, f"ad-approved:{ad.pk}")
             approved += 1
         self.message_user(request, f"Approved {approved} campaign(s).", messages.SUCCESS)

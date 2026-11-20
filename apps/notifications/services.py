@@ -3,12 +3,11 @@ import os
 from datetime import timedelta
 
 import requests
-from django.conf import settings
-from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 
 from .models import Notification
+from .email import send_tarmac_email
 
 logger = logging.getLogger(__name__)
 RETRY_MINUTES = (1, 5, 15, 60, 360)
@@ -61,12 +60,39 @@ def notify_user(user, subject, body, data, event_key):
 
 
 def _send_email(notification):
-    return send_mail(
-        notification.subject or "Tarmac notification",
-        notification.body,
-        settings.DEFAULT_FROM_EMAIL,
-        [notification.user.email],
-        fail_silently=False,
+    user = notification.user
+    data = notification.data or {}
+    kind = data.get("kind", "")
+    origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").rstrip("/")
+    action_url = f"{origin}/dashboard"
+    action_label = "Open Tarmac"
+    if kind.startswith("lost_found"):
+        action_url, action_label = f"{origin}/lost-found", "Review possible match"
+    elif kind in ("order_update", "order_created"):
+        product_id = data.get("product_id")
+        action_url = f"{origin}/marketplace/{product_id}" if product_id else f"{origin}/dashboard"
+        action_label = "View order update"
+    elif kind.startswith("profile_change"):
+        action_url = f"{origin}/admin/profile-changes" if user.is_staff else f"{origin}/profile"
+        action_label = "Review profile request" if user.is_staff else "Open profile"
+    elif kind == "admin_conversation_reply":
+        conversation_id = data.get("conversation_id")
+        action_url = f"{origin}/messages?conversation={conversation_id}" if conversation_id else f"{origin}/messages"
+        action_label = "Open official message"
+    elif kind == "verification_review":
+        action_url, action_label = f"{origin}/verify-student", "View verification status"
+    elif kind in ("item_claim", "item_claim_review"):
+        action_url, action_label = f"{origin}/lost-found", "Review item claim"
+    elif kind.startswith("support"):
+        action_url, action_label = f"{origin}/support", "Open support inbox"
+    return send_tarmac_email(
+        subject=notification.subject or "Tarmac notification",
+        text_body=notification.body,
+        recipient=user.email,
+        recipient_name=user.first_name or user.username,
+        action_url=action_url,
+        action_label=action_label,
+        preheader=notification.body[:140],
     )
 
 

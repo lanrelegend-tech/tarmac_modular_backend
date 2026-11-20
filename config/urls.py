@@ -6,7 +6,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from apps.payments.webhooks import paystack_webhook
 from apps.accounts.authentication import SchoolTokenObtainPairSerializer, SchoolTokenRefreshSerializer
 from rest_framework_simplejwt.views import TokenBlacklistView
-from apps.administration.views import system_status
+from apps.administration.views import system_status, system_logo
 
 class SchoolTokenObtainPairView(TokenObtainPairView):
     serializer_class = SchoolTokenObtainPairSerializer
@@ -16,6 +16,7 @@ class SchoolTokenRefreshView(TokenRefreshView):
 
 urlpatterns = [
  path("api/system/status/", system_status, name="system-status"),
+ path("api/system/logo/", system_logo, name="system-logo"),
  path("admin/", admin.site.urls), path("api/auth/token/", SchoolTokenObtainPairView.as_view(), name="token_obtain_pair"),
  path("api/auth/token/refresh/", SchoolTokenRefreshView.as_view(), name="token_refresh"),
  path("api/auth/token/logout/", TokenBlacklistView.as_view(), name="token_blacklist"),

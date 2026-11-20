@@ -8,7 +8,9 @@ class MaintenanceModeMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if request.path.startswith("/admin/") or request.path.startswith("/api/admin-tools/settings/") or request.path == "/api/system/status/":
+        if (request.path.startswith("/admin/") or request.path.startswith("/api/admin-tools/")
+                or request.path.startswith("/api/auth/") or request.path.startswith("/api/system/")
+                or request.path == "/api/payments/webhook/"):
             return self.get_response(request)
         platform = PlatformSettings.get_solo()
         if platform.maintenance_mode:

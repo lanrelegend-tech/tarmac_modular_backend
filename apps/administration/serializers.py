@@ -98,11 +98,15 @@ class AdminAccountSerializer(serializers.ModelSerializer):
 class AdminConversationMessageSerializer(serializers.ModelSerializer):
     sender_name = serializers.SerializerMethodField()
     is_staff = serializers.BooleanField(source="sender.is_staff", read_only=True)
+    attachments = serializers.SerializerMethodField()
     class Meta:
         from apps.messaging.models import Message
         model = Message
-        fields = ("id", "sender", "sender_name", "is_staff", "body", "created_at", "read_at")
-    def get_sender_name(self, obj): return obj.sender.get_full_name().strip() or obj.sender.username
+        fields = ("id", "sender", "sender_name", "is_staff", "body", "attachments", "created_at", "read_at")
+    def get_sender_name(self, obj): return "Tarmac Administration" if obj.sender.is_staff else (obj.sender.get_full_name().strip() or obj.sender.username)
+    def get_attachments(self, obj):
+        from apps.messaging.serializers import MessageAttachmentSerializer
+        return MessageAttachmentSerializer(obj.attachments.all(), many=True, context=self.context).data
 
 class AdminConversationSerializer(serializers.ModelSerializer):
     participants_data = serializers.SerializerMethodField()
@@ -111,7 +115,7 @@ class AdminConversationSerializer(serializers.ModelSerializer):
     class Meta:
         from apps.messaging.models import Conversation
         model = Conversation
-        fields = ("id", "participants_data", "messages", "unread_count", "status", "created_at", "updated_at")
+        fields = ("id", "participants_data", "messages", "unread_count", "status", "context_type", "context_title", "is_official", "created_at", "updated_at")
     def get_participants_data(self, obj):
         return [{"id": user.pk, "name": user.get_full_name().strip() or user.username, "email": user.email, "phone": user.phone_number, "matric_number": user.matric_number, "is_staff": user.is_staff} for user in obj.participants.all()]
     def get_messages(self, obj):
@@ -120,10 +124,27 @@ class AdminConversationSerializer(serializers.ModelSerializer):
         return AdminConversationMessageSerializer(list(reversed(messages)), many=True, context=self.context).data
 
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
-    class Meta: model = SubscriptionPlan; fields = ("id", "name", "description", "price_kobo", "duration_days", "placement", "max_images", "visibility", "features", "is_popular", "color", "is_active", "created_at", "updated_at"); read_only_fields = ("id", "created_at", "updated_at")
+    PAGE_CHOICES = {"homepage", "marketplace", "lost_found", "announcements"}
+    class Meta: model = SubscriptionPlan; fields = ("id", "name", "description", "price_kobo", "duration_days", "placement", "allowed_pages", "max_pages", "max_images", "visibility", "features", "is_popular", "color", "is_active", "created_at", "updated_at"); read_only_fields = ("id", "created_at", "updated_at")
     def validate_duration_days(self, value):
         if not 1 <= value <= 366: raise serializers.ValidationError("Duration must be between 1 and 366 days.")
         return value
+    def validate_allowed_pages(self, value):
+        if not isinstance(value, list) or not value or len(value) > len(self.PAGE_CHOICES):
+            raise serializers.ValidationError("Choose between 1 and 4 advertising pages.")
+        if any(not isinstance(page, str) or page not in self.PAGE_CHOICES for page in value):
+            raise serializers.ValidationError("Choose valid advertising pages.")
+        if len(set(value)) != len(value):
+            raise serializers.ValidationError("Choose valid, unique advertising pages.")
+        return value
+    def validate(self, attrs):
+        pages = attrs.get("allowed_pages", getattr(self.instance, "allowed_pages", []))
+        max_pages = attrs.get("max_pages", getattr(self.instance, "max_pages", 1))
+        if not pages:
+            raise serializers.ValidationError({"allowed_pages": "Choose at least one page for this plan."})
+        if not 1 <= max_pages <= len(pages):
+            raise serializers.ValidationError({"max_pages": "Maximum pages must be between 1 and the number of selected pages."})
+        return attrs
 
 class StudentSubscriptionSerializer(serializers.ModelSerializer):
     plan_name = serializers.CharField(source="plan.name", read_only=True)
@@ -200,7 +221,7 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
     site_logo = serializers.ImageField(write_only=True, required=False, allow_null=True)
     class Meta:
         model = PlatformSettings
-        fields = ("site_name", "site_logo", "site_logo_url", "tagline", "support_email", "contact_email", "maintenance_mode", "maintenance_message", "marketplace_enabled", "lost_found_enabled", "messaging_enabled", "ads_enabled", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled", "registration_enabled", "listing_approval_required", "max_product_images", "student_verification_enabled", "require_student_id", "email_verification_required", "auto_approve_students", "featured_products_enabled", "reviews_enabled", "review_moderation_enabled", "announcements_enabled", "email_notifications_enabled", "report_notifications_enabled", "terms_text", "privacy_text", "community_guidelines_text", "updated_at")
+        fields = ("site_name", "site_logo", "site_logo_url", "tagline", "support_email", "contact_email", "maintenance_mode", "maintenance_message", "marketplace_enabled", "lost_found_enabled", "messaging_enabled", "ads_enabled", "homepage_ads_enabled", "marketplace_ads_enabled", "homepage_lost_found_enabled", "ad_slide_duration_seconds", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "sponsored_products_enabled", "sponsored_product_fee_enabled", "sponsored_product_fee_kobo", "sponsored_product_duration_days", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled", "registration_enabled", "listing_approval_required", "max_product_images", "student_verification_enabled", "require_student_id", "email_verification_required", "auto_approve_students", "featured_products_enabled", "reviews_enabled", "review_moderation_enabled", "announcements_enabled", "email_notifications_enabled", "report_notifications_enabled", "terms_text", "privacy_text", "community_guidelines_text", "updated_at")
         read_only_fields = ("updated_at",)
     def get_site_logo_url(self, obj):
         if not obj.site_logo: return ""
@@ -213,6 +234,14 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
     def validate_max_product_images(self, value):
         if not 1 <= value <= 10:
             raise serializers.ValidationError("Maximum product images must be between 1 and 10.")
+        return value
+    def validate_ad_slide_duration_seconds(self, value):
+        if not 5 <= value <= 86400:
+            raise serializers.ValidationError("Ad slide duration must be between 5 seconds and 24 hours.")
+        return value
+    def validate_sponsored_product_duration_days(self, value):
+        if not 1 <= value <= 366:
+            raise serializers.ValidationError("Sponsored product duration must be between 1 and 366 days.")
         return value
 
 class AdminPaymentSerializer(serializers.ModelSerializer):
@@ -270,8 +299,8 @@ class AdminProductSerializer(serializers.ModelSerializer):
     class Meta:
         from apps.products.models import Product
         model = Product
-        fields = ("id", "seller_id", "seller_name", "seller_email", "category", "category_name", "title", "description", "condition", "price", "location", "status", "is_featured", "featured_until", "image_url", "created_at")
-        read_only_fields = ("id", "seller_id", "seller_name", "seller_email", "category", "category_name", "title", "description", "condition", "price", "location", "image_url", "created_at")
+        fields = ("id", "seller_id", "seller_name", "seller_email", "category", "category_name", "title", "description", "condition", "price", "location", "status", "is_featured", "featured_until", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "image_url", "created_at")
+        read_only_fields = ("id", "seller_id", "seller_name", "seller_email", "category", "category_name", "title", "description", "condition", "price", "location", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "image_url", "created_at")
     def get_image_url(self, obj):
         if not obj.images.exists(): return None
         request = self.context.get("request")

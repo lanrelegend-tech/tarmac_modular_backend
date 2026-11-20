@@ -1,17 +1,20 @@
 import mimetypes
-from django.db import models
+from django.db import models, transaction
+from django.db.models import Count
 from django.http import FileResponse
 from rest_framework import viewsets, permissions
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import status
-from apps.accounts.permissions import IsVerifiedStudent
+from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.permissions import PlatformFeatureEnabled
 from .models import LostFoundReport,ItemMatch,ItemMatchReview,ItemClaim
 from .serializers import LostFoundReportSerializer,ItemMatchSerializer,ItemClaimSerializer
 from .services import create_possible_matches
 from apps.notifications.services import notify_user
+from apps.messaging.models import Conversation
+from apps.messaging.serializers import ConversationSerializer
 class LostFoundReportViewSet(viewsets.ModelViewSet):
     platform_feature = "lost_found_enabled"
     serializer_class=LostFoundReportSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
@@ -19,7 +22,6 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
     filterset_fields = ["report_type", "category", "status"]
     def get_queryset(self): return LostFoundReport.objects.filter(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
     def perform_create(self,serializer):
-        if not self.request.user.is_student_verified or self.request.user.is_suspended: raise PermissionDenied("An active verified student account is required.")
         report=serializer.save(reporter=self.request.user); create_possible_matches(report)
     def perform_update(self,serializer):
         if serializer.instance.reporter_id!=self.request.user.id: raise PermissionDenied("You can only update your own report.")
@@ -71,6 +73,26 @@ class ItemMatchViewSet(viewsets.ReadOnlyModelViewSet):
     platform_feature = "lost_found_enabled"
     serializer_class=ItemMatchSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     def get_queryset(self): return (ItemMatch.objects.filter(lost_report__reporter=self.request.user)|ItemMatch.objects.filter(found_report__reporter=self.request.user)).filter(lost_report__is_active=True, found_report__is_active=True, is_dismissed=False)
+    @action(detail=True, methods=["post"])
+    @transaction.atomic
+    def message(self, request, pk=None):
+        match = self.get_object()
+        other = match.found_report.reporter if request.user.pk == match.lost_report.reporter_id else match.lost_report.reporter
+        if other.pk == request.user.pk or not is_student_feature_eligible(other):
+            raise PermissionDenied("The other student is not available for messaging.")
+        title = f"Lost and found match: {match.lost_report.title} / {match.found_report.title}"[:180]
+        conversation = Conversation.objects.annotate(participant_count=Count("participants", distinct=True)).filter(
+            context_type=Conversation.ContextType.LOST_FOUND, context_id=match.pk, participant_count=2,
+            participants=request.user,
+        ).filter(participants=other).first()
+        if conversation is None:
+            conversation = Conversation.objects.create(
+                context_type=Conversation.ContextType.LOST_FOUND,
+                context_id=match.pk,
+                context_title=title,
+            )
+            conversation.participants.add(request.user, other)
+        return Response(ConversationSerializer(conversation, context={"request": request}).data, status=status.HTTP_200_OK)
     @action(detail=True, methods=["post"])
     def review(self, request, pk=None):
         match = self.get_object()

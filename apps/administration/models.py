@@ -57,6 +57,7 @@ class PlatformSettings(models.Model):
     email_verification_required = models.BooleanField(default=True)
     auto_approve_students = models.BooleanField(default=False)
     featured_products_enabled = models.BooleanField(default=True)
+    sponsored_products_enabled = models.BooleanField(default=True)
     reviews_enabled = models.BooleanField(default=True)
     review_moderation_enabled = models.BooleanField(default=True)
     announcements_enabled = models.BooleanField(default=True)
@@ -71,9 +72,16 @@ class PlatformSettings(models.Model):
     lost_found_enabled = models.BooleanField(default=True)
     messaging_enabled = models.BooleanField(default=True)
     ads_enabled = models.BooleanField(default=True)
+    ad_slide_duration_seconds = models.PositiveIntegerField(default=300)
+    homepage_ads_enabled = models.BooleanField(default=True)
+    marketplace_ads_enabled = models.BooleanField(default=True)
+    homepage_lost_found_enabled = models.BooleanField(default=True)
     paystack_enabled = models.BooleanField(default=False)
     listing_fee_enabled = models.BooleanField(default=True)
     listing_fee_kobo = models.PositiveIntegerField(default=150000)
+    sponsored_product_fee_enabled = models.BooleanField(default=True)
+    sponsored_product_fee_kobo = models.PositiveIntegerField(default=50000)
+    sponsored_product_duration_days = models.PositiveSmallIntegerField(default=7)
     ad_fee_enabled = models.BooleanField(default=True)
     ad_fee_kobo = models.PositiveIntegerField(default=50000)
     subscription_fee_enabled = models.BooleanField(default=True)
@@ -106,6 +114,10 @@ class PlatformSettings(models.Model):
             raise ValidationError("Fees cannot be negative.")
         if not 1 <= self.max_product_images <= 10:
             raise ValidationError("Maximum product images must be between 1 and 10.")
+        if not 5 <= self.ad_slide_duration_seconds <= 86400:
+            raise ValidationError("Advertisement slide duration must be between 5 seconds and 24 hours.")
+        if not 1 <= self.sponsored_product_duration_days <= 366:
+            raise ValidationError("Sponsored product duration must be between 1 and 366 days.")
 
 
 class SupportTicket(models.Model):
@@ -152,11 +164,14 @@ class SupportAttachment(models.Model):
         ordering = ("created_at",)
 
 class SubscriptionPlan(models.Model):
+    AD_PAGES = {"homepage", "marketplace", "lost_found", "announcements"}
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True)
     price_kobo = models.PositiveIntegerField(default=0)
     duration_days = models.PositiveSmallIntegerField(default=30)
     placement = models.CharField(max_length=80, default="Marketplace")
+    allowed_pages = models.JSONField(default=list, blank=True)
+    max_pages = models.PositiveSmallIntegerField(default=1)
     max_images = models.PositiveSmallIntegerField(default=3)
     visibility = models.CharField(max_length=60, default="Standard")
     features = models.JSONField(default=list, blank=True)
@@ -166,6 +181,14 @@ class SubscriptionPlan(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     class Meta: ordering = ("price_kobo", "name")
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if not 1 <= self.duration_days <= 366:
+            raise ValidationError({"duration_days": "Duration must be between 1 and 366 days."})
+        if not isinstance(self.allowed_pages, list) or not self.allowed_pages or any(not isinstance(page, str) or page not in self.AD_PAGES for page in self.allowed_pages) or len(set(self.allowed_pages)) != len(self.allowed_pages):
+            raise ValidationError({"allowed_pages": "Choose one or more valid, unique advertising pages."})
+        if not 1 <= self.max_pages <= len(self.allowed_pages):
+            raise ValidationError({"max_pages": "Maximum pages must be between 1 and the selected page count."})
 
 class StudentSubscription(models.Model):
     class Status(models.TextChoices): ACTIVE="active","Active"; EXPIRED="expired","Expired"; CANCELLED="cancelled","Cancelled"

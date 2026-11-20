@@ -87,8 +87,14 @@ def paystack_webhook(request):
         if payment.product_id and payment.product.status == Product.Status.PENDING_PAYMENT:
             platform = PlatformSettings.get_solo()
             payment.product.status = Product.Status.PENDING_REVIEW if platform.listing_approval_required else Product.Status.ACTIVE
-            if not platform.listing_approval_required: payment.product.expires_at = timezone.now() + timedelta(days=30)
-            payment.product.save(update_fields=("status", "expires_at", "updated_at"))
+            update_fields = ["status", "expires_at", "updated_at"]
+            if not platform.listing_approval_required:
+                payment.product.expires_at = timezone.now() + timedelta(days=30)
+                if payment.product.sponsor_requested and platform.sponsored_products_enabled:
+                    payment.product.is_featured = True
+                    payment.product.featured_until = timezone.now() + timedelta(days=payment.product.sponsorship_duration_days)
+                    update_fields.extend(("is_featured", "featured_until"))
+            payment.product.save(update_fields=update_fields)
             notify_user(payment.user, "Listing payment received", f"Your listing '{payment.product.title}' is " + ("awaiting school review." if platform.listing_approval_required else "now active."),
                         {"kind": "listing_review", "product_id": payment.product_id, "title": payment.product.title}, f"listing-review:{payment.product_id}")
         elif payment.advertisement_id and payment.advertisement.status == AdCampaign.Status.PENDING_PAYMENT:

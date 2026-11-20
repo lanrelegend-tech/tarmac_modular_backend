@@ -5,12 +5,11 @@ import secrets
 from datetime import timedelta
 from urllib.parse import urlencode
 
-from django.conf import settings
-from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 
 from .models import AccountActionToken
+from apps.notifications.email import send_tarmac_email
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,16 @@ def issue_account_action_token(user, purpose):
     subject = "Verify your Tarmac email" if purpose == AccountActionToken.Purpose.EMAIL_VERIFY else "Reset your Tarmac password"
     action = "verify your email address" if purpose == AccountActionToken.Purpose.EMAIL_VERIFY else "reset your password"
     try:
-        send_mail(subject, f"Use this one-time link to {action}:\n\n{link}\n\nThe link expires in {int(lifetime.total_seconds() // 3600)} hour(s).", settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
+        text_body = f"Hi {user.first_name or user.username},\n\nUse the button below to {action}. This secure link expires in {int(lifetime.total_seconds() // 3600)} hour(s).\n\nIf you did not request this, ignore this email.\n\n{link}"
+        send_tarmac_email(
+            subject=subject,
+            text_body=text_body,
+            recipient=user.email,
+            recipient_name=user.first_name or user.username,
+            action_url=link,
+            action_label="Verify email" if purpose == AccountActionToken.Purpose.EMAIL_VERIFY else "Reset password",
+            preheader=f"Use this secure link to {action}.",
+        )
     except Exception:
         logger.exception("Could not send account email for user %s", user.pk)
     return record

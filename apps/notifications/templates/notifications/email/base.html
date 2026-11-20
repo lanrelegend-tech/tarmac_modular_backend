@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="x-apple-disable-message-reformatting">
+    <title>{{ subject }}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f3f6f3;font-family:Arial,Helvetica,sans-serif;color:#26372d;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{{ preheader }}</div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f3f6f3;padding:28px 12px;">
+      <tr><td align="center">
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;border-collapse:separate;border-spacing:0;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 8px 30px rgba(25,61,42,.08);">
+          <tr>
+            <td style="background:#174d35;padding:27px 32px 25px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr>
+                <td style="color:#ffffff;font-size:25px;font-weight:800;letter-spacing:-1px;">TARMAC<span style="color:#e5a33b;">.</span></td>
+                <td align="right" style="color:#d7e6da;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">KWASU student community</td>
+              </tr></table>
+            </td>
+          </tr>
+          <tr><td style="padding:38px 36px 34px;">
+            <div style="width:42px;height:4px;border-radius:5px;background:#e5a33b;margin:0 0 22px;"></div>
+            <h1 style="margin:0 0 16px;color:#173d2b;font-size:25px;line-height:1.25;letter-spacing:-.4px;">{{ subject }}</h1>
+            <p style="margin:0 0 14px;color:#34463a;font-size:15px;line-height:1.75;">Hi {{ recipient_name }},</p>
+            <div style="color:#526258;font-size:15px;line-height:1.8;">{{ body_text|linebreaksbr }}</div>
+            {% if action_url %}
+            <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:27px 0 8px;"><tr><td align="center" bgcolor="#174d35" style="border-radius:11px;">
+              <a href="{{ action_url }}" style="display:inline-block;padding:14px 22px;border:1px solid #174d35;border-radius:11px;color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;">{{ action_label }}</a>
+            </td></tr></table>
+            <p style="margin:15px 0 0;color:#89958c;font-size:11px;line-height:1.6;">If the button doesn’t work, copy and paste this link into your browser:<br><a href="{{ action_url }}" style="color:#34764b;word-break:break-all;">{{ action_url }}</a></p>
+            {% endif %}
+            <p style="margin:28px 0 0;color:#526258;font-size:14px;line-height:1.7;">Thanks,<br><strong style="color:#173d2b;">The Tarmac team</strong></p>
+          </td></tr>
+          <tr><td style="border-top:1px solid #edf1ed;background:#fbfcfb;padding:20px 32px;">
+            <p style="margin:0;color:#89958c;font-size:11px;line-height:1.7;">You received this email because of activity on your Tarmac account. {% if support_email %}Need help? <a href="mailto:{{ support_email }}" style="color:#34764b;text-decoration:none;">Contact support</a>.{% endif %}</p>
+            {% if frontend_origin %}<p style="margin:7px 0 0;color:#a2aaa4;font-size:10px;"><a href="{{ frontend_origin }}" style="color:#75847a;text-decoration:none;">Tarmac student marketplace</a></p>{% endif %}
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>

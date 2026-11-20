@@ -1,5 +1,5 @@
 from rest_framework import viewsets
-from apps.accounts.permissions import IsVerifiedStudent
+from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from rest_framework.exceptions import ValidationError,PermissionDenied
 from django.db import transaction
 from django.utils import timezone
@@ -17,8 +17,8 @@ class OrderViewSet(viewsets.ModelViewSet):
         if Order.objects.filter(buyer=self.request.user, product=product, status__in=(Order.Status.REQUESTED, Order.Status.ACCEPTED)).exists():
             raise ValidationError({"product": "You already have an open request for this listing."})
         if product.seller_id==self.request.user.id: raise ValidationError("You cannot order your own listing.")
-        if not self.request.user.is_student_verified or self.request.user.is_suspended: raise PermissionDenied("An active verified student account is required.")
-        if not product.seller.is_active or product.seller.is_suspended or not product.seller.is_student_verified: raise ValidationError("This seller is not currently eligible to receive orders.")
+        if not is_student_feature_eligible(self.request.user): raise PermissionDenied("An active student account is required.")
+        if not is_student_feature_eligible(product.seller): raise ValidationError("This seller is not currently eligible to receive orders.")
         if not product.category.is_active or not product.category.is_allowed_for_sale: raise ValidationError("This listing category is no longer available.")
         if product.status != Product.Status.ACTIVE or (product.expires_at and product.expires_at <= timezone.now()): raise ValidationError("This listing is not available.")
         order = serializer.save(buyer=self.request.user,seller=product.seller)
@@ -26,8 +26,15 @@ class OrderViewSet(viewsets.ModelViewSet):
             product.seller,
             "New order request",
             f"{self.request.user.username} sent a request for your listing: {product.title}.",
-            {"kind": "order_update", "order_id": order.pk, "title": product.title},
+            {"kind": "order_update", "order_id": order.pk, "product_id": product.pk, "title": product.title, "status": order.status},
             f"order-created:{order.pk}:seller",
+        )
+        notify_user(
+            order.buyer,
+            "Order request sent",
+            f"Your request for {product.title} was sent to the seller. We’ll email you when they respond.",
+            {"kind": "order_update", "order_id": order.pk, "product_id": product.pk, "title": product.title, "status": order.status},
+            f"order-created:{order.pk}:buyer",
         )
     @transaction.atomic
     def perform_update(self,serializer):
@@ -64,7 +71,7 @@ class OrderViewSet(viewsets.ModelViewSet):
                 Order.Status.COMPLETED: "The seller marked the sale complete.",
             }
             notify_user(recipient, "Order updated", labels.get(updated.status, "Your order was updated."),
-                        {"kind": "order_update", "order_id": updated.pk, "title": product.title}, f"order-status:{updated.pk}:{updated.status}:{recipient.pk}")
+                        {"kind": "order_update", "order_id": updated.pk, "product_id": product.pk, "title": product.title, "status": updated.status}, f"order-status:{updated.pk}:{updated.status}:{recipient.pk}")
         elif old_status == updated.status and "agreed_price" in serializer.validated_data:
             notify_user(updated.buyer, "Seller proposed a price", "The seller updated the proposed price for your order.",
-                        {"kind": "order_update", "order_id": updated.pk, "title": product.title}, f"order-price:{updated.pk}:{updated.agreed_price}")
+                        {"kind": "order_update", "order_id": updated.pk, "product_id": product.pk, "title": product.title, "status": updated.status}, f"order-price:{updated.pk}:{updated.agreed_price}")

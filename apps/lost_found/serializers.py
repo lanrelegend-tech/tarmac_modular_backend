@@ -24,7 +24,11 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("The incident date cannot be in the future.")
         return value
 class ItemMatchSerializer(serializers.ModelSerializer):
-    class Meta: model=ItemMatch; fields="__all__"
+    lost_title = serializers.CharField(source="lost_report.title", read_only=True)
+    found_title = serializers.CharField(source="found_report.title", read_only=True)
+    lost_reporter_id = serializers.IntegerField(source="lost_report.reporter_id", read_only=True)
+    found_reporter_id = serializers.IntegerField(source="found_report.reporter_id", read_only=True)
+    class Meta: model=ItemMatch; fields=("id", "lost_report", "lost_title", "lost_reporter_id", "found_report", "found_title", "found_reporter_id", "score", "reasons", "created_at"); read_only_fields=fields
 
 class ItemClaimSerializer(serializers.ModelSerializer):
     claimant_name = serializers.SerializerMethodField()

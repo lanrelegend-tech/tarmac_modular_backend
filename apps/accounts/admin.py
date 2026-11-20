@@ -30,6 +30,8 @@ class SchoolUserAdmin(UserAdmin):
     list_display = ("email", "username", "matric_number", "is_student_verified", "is_suspended", "is_staff")
     search_fields = ("email", "username", "matric_number")
     ordering = ("email",)
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 @admin.register(StudentVerification)
 class StudentVerificationAdmin(admin.ModelAdmin):
@@ -49,7 +51,8 @@ class StudentVerificationAdmin(admin.ModelAdmin):
                 matric = data.get("submitted_matric_number")
                 if user and matric and User.objects.exclude(pk=user.pk).filter(matric_number=matric).exists():
                     self.add_error("submitted_matric_number", "This matric number is already assigned to another account.")
-                if user and not user.email_verified:
+                from apps.administration.models import PlatformSettings
+                if user and PlatformSettings.get_solo().email_verification_required and not user.email_verified:
                     self.add_error("status", "The student must verify their email before student approval.")
             return data
     form = VerificationReviewForm

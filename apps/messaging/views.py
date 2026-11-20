@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied, ValidationError
-from apps.accounts.permissions import IsVerifiedStudent
+from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.permissions import PlatformFeatureEnabled
 from django.utils import timezone
 from django.http import FileResponse
@@ -18,8 +18,8 @@ class ConversationViewSet(viewsets.ModelViewSet):
     def perform_create(self,serializer):
         participants = serializer.validated_data.get("participants", [])
         other_users = [user for user in participants if user.pk != self.request.user.pk]
-        if len(other_users) != 1 or not other_users[0].is_active or other_users[0].is_suspended or not other_users[0].email_verified or not other_users[0].is_student_verified:
-            raise ValidationError({"participants": "A conversation must be with exactly one other active, verified student."})
+        if len(other_users) != 1 or not is_student_feature_eligible(other_users[0]):
+            raise ValidationError({"participants": "A conversation must be with exactly one other active student account."})
         convo=serializer.save(); convo.participants.add(self.request.user)
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):
@@ -37,6 +37,8 @@ class MessageViewSet(viewsets.ModelViewSet):
         convo=serializer.validated_data["conversation"]
         if not convo.participants.filter(pk=self.request.user.pk).exists(): raise PermissionDenied("You are not a participant in this conversation.")
         serializer.save(sender=self.request.user)
+        convo.updated_at = timezone.now()
+        convo.save(update_fields=("updated_at",))
     def perform_update(self, serializer):
         if serializer.instance.sender_id != self.request.user.id:
             raise PermissionDenied("Only the message sender can edit this message.")
@@ -50,7 +52,7 @@ class MessageViewSet(viewsets.ModelViewSet):
 @permission_classes([permissions.IsAuthenticated])
 def message_attachment_file(request, attachment_id):
     attachment = get_object_or_404(MessageAttachment.objects.select_related("message__conversation"), pk=attachment_id)
-    if not attachment.message.conversation.participants.filter(pk=request.user.pk).exists():
+    if not request.user.is_staff and not attachment.message.conversation.participants.filter(pk=request.user.pk).exists():
         raise PermissionDenied("You are not a participant in this conversation.")
     content_type = attachment.content_type or mimetypes.guess_type(attachment.file.name)[0] or "application/octet-stream"
     return FileResponse(attachment.file.open("rb"), content_type=content_type)

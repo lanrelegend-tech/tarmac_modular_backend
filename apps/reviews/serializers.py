@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from apps.accounts.models import User
+from apps.accounts.permissions import is_student_feature_eligible
 from apps.orders.models import Order
 from .models import SellerReview
 
@@ -36,10 +37,8 @@ class SellerReviewSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"order": "A review is available after the seller marks the sale complete."})
         if order.seller_id == request.user.pk:
             raise serializers.ValidationError({"order": "You cannot review your own seller account."})
-        seller = User.objects.filter(
-            pk=order.seller_id, is_active=True, is_student_verified=True, is_suspended=False
-        ).first()
-        if seller is None:
+        seller = User.objects.filter(pk=order.seller_id).first()
+        if not is_student_feature_eligible(seller):
             raise serializers.ValidationError({"order": "This seller is not currently eligible for reviews."})
         return attrs
 

@@ -6,16 +6,16 @@ from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework import generics, permissions, viewsets
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import throttle_classes
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
-from .models import User, StudentVerification, AccountActionToken
-from .serializers import RegisterSerializer, UserSerializer, StudentPublicProfileSerializer, StudentVerificationSerializer, ProfileUpdateSerializer, EmailTokenSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
-from .permissions import IsVerifiedStudent
+from .models import User, StudentVerification, AccountActionToken, ProfileChangeRequest, ProfileChangeMessage
+from .serializers import RegisterSerializer, UserSerializer, StudentPublicProfileSerializer, StudentVerificationSerializer, ProfileUpdateSerializer, StudentProfileChangeRequestSerializer, EmailTokenSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
+from .permissions import IsVerifiedStudent, is_student_feature_eligible
 from .services import consume_account_action_token, issue_account_action_token
 
 logger = logging.getLogger(__name__)
@@ -23,23 +23,75 @@ class AccountActionThrottle(AnonRateThrottle):
     scope = "account_action"
 class RegisterView(generics.CreateAPIView):
     queryset=User.objects.all(); serializer_class=RegisterSerializer; permission_classes=[permissions.AllowAny]
+    throttle_classes = [AccountActionThrottle]
     def create(self, request, *args, **kwargs):
         from apps.administration.models import PlatformSettings
         from rest_framework.exceptions import PermissionDenied
         if not PlatformSettings.get_solo().registration_enabled: raise PermissionDenied("Student registration is currently closed.")
         return super().create(request, *args, **kwargs)
 class StudentPublicProfileView(generics.RetrieveAPIView):
-    queryset = User.objects.filter(is_active=True, is_student_verified=True, is_suspended=False)
     serializer_class = StudentPublicProfileSerializer
     permission_classes = [IsVerifiedStudent]
+    def get_queryset(self):
+        queryset = User.objects.filter(is_active=True, is_suspended=False)
+        from apps.administration.models import PlatformSettings
+        platform = PlatformSettings.get_solo()
+        if platform.student_verification_enabled:
+            queryset = queryset.filter(is_student_verified=True)
+        if platform.email_verification_required:
+            queryset = queryset.filter(email_verified=True)
+        return queryset
 @api_view(["GET", "PATCH"])
 @permission_classes([permissions.IsAuthenticated])
 def me(request):
     if request.method == "PATCH":
+        allowed_preferences = {"notification_email_enabled", "notification_whatsapp_enabled"}
+        if not set(request.data.keys()).issubset(allowed_preferences):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Profile details cannot be edited directly. Submit a profile change request for administrator review.")
         serializer = ProfileUpdateSerializer(request.user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
     return Response(UserSerializer(request.user).data)
+
+
+class ProfileChangeRequestViewSet(viewsets.ModelViewSet):
+    serializer_class = StudentProfileChangeRequestSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        return ProfileChangeRequest.objects.filter(user=self.request.user).prefetch_related("messages__sender")
+
+    def perform_create(self, serializer):
+        change_request = serializer.save()
+        from apps.notifications.services import notify_user
+        for administrator in User.objects.filter(is_staff=True, is_active=True, is_suspended=False):
+            notify_user(administrator, "Profile change request", f"{change_request.user.get_full_name() or change_request.user.username} requested a profile change.", {"kind": "profile_change_request", "request_id": change_request.pk}, f"profile-change:{change_request.pk}:admin:{administrator.pk}")
+
+    @action(detail=True, methods=["post"])
+    def reply(self, request, pk=None):
+        change_request = self.get_object()
+        if change_request.status != ProfileChangeRequest.Status.NEEDS_INFO:
+            raise ValidationError("There is no administrator question waiting for a reply.")
+        body = str(request.data.get("body", "")).strip()
+        if len(body) < 2 or len(body) > 3000:
+            raise ValidationError({"body": "Write a reply between 2 and 3000 characters."})
+        ProfileChangeMessage.objects.create(request=change_request, sender=request.user, body=body)
+        change_request.status = ProfileChangeRequest.Status.PENDING
+        change_request.save(update_fields=("status", "updated_at"))
+        return Response(self.get_serializer(change_request).data)
+
+
+@api_view(["GET"])
+@permission_classes([permissions.IsAuthenticated])
+def profile_change_request_image(request, request_id):
+    change_request = get_object_or_404(ProfileChangeRequest, pk=request_id, user=request.user)
+    if not change_request.requested_profile_picture:
+        from rest_framework.exceptions import NotFound
+        raise NotFound("No profile picture was included in this request.")
+    content_type = mimetypes.guess_type(change_request.requested_profile_picture.name)[0] or "application/octet-stream"
+    return FileResponse(change_request.requested_profile_picture.open("rb"), content_type=content_type)
 
 @staff_member_required
 def student_id_image(request, verification_id):
@@ -51,7 +103,7 @@ def student_id_image(request, verification_id):
 @permission_classes([permissions.IsAuthenticated])
 def profile_image(request, user_id):
     target = get_object_or_404(User, pk=user_id, is_active=True)
-    if request.user.pk != user_id and not (request.user.is_student_verified and not request.user.is_suspended and target.is_student_verified and not target.is_suspended):
+    if request.user.pk != user_id and not (is_student_feature_eligible(request.user) and is_student_feature_eligible(target)):
         from rest_framework.exceptions import PermissionDenied
         raise PermissionDenied("An active verified student account is required to view another student's profile image.")
     if not target.profile_picture:
@@ -118,7 +170,7 @@ class VerificationViewSet(viewsets.ModelViewSet):
         platform = PlatformSettings.get_solo()
         matric = serializer.validated_data["submitted_matric_number"]
         if platform.auto_approve_students:
-            if not self.request.user.email_verified: raise ValidationError("Verify your email before automatic student approval.")
+            if platform.email_verification_required and not self.request.user.email_verified: raise ValidationError("Verify your email before automatic student approval.")
             if User.objects.filter(matric_number__iexact=matric).exclude(pk=self.request.user.pk).exists(): raise ValidationError({"submitted_matric_number": "This matric number is already assigned."})
             serializer.save(user=self.request.user, status=StudentVerification.Status.APPROVED, reviewed_at=timezone.now())
             self.request.user.matric_number = matric; self.request.user.is_student_verified = True

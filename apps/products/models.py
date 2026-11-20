@@ -11,9 +11,10 @@ class Product(models.Model):
     title=models.CharField(max_length=160); description=models.TextField(); condition=models.CharField(max_length=20,choices=Condition.choices)
     price=models.DecimalField(max_digits=12,decimal_places=2,validators=[MinValueValidator(0.01)]); negotiable=models.BooleanField(default=False); location=models.CharField(max_length=160)
     status=models.CharField(max_length=24,choices=Status.choices,default=Status.PENDING_PAYMENT); expires_at=models.DateTimeField(null=True,blank=True); is_featured=models.BooleanField(default=False); featured_until=models.DateTimeField(null=True,blank=True)
+    sponsor_requested=models.BooleanField(default=False); sponsorship_fee_kobo=models.PositiveIntegerField(default=0); sponsorship_duration_days=models.PositiveSmallIntegerField(default=7); featured_position=models.PositiveIntegerField(null=True,blank=True)
     created_at=models.DateTimeField(auto_now_add=True); updated_at=models.DateTimeField(auto_now=True)
     class Meta:
-        indexes = [models.Index(fields=("status", "created_at"), name="product_status_created_idx"), models.Index(fields=("status", "expires_at"), name="product_status_expiry_idx"), models.Index(fields=("category", "status"), name="product_category_status_idx")]
+        indexes = [models.Index(fields=("status", "created_at"), name="product_status_created_idx"), models.Index(fields=("status", "expires_at"), name="product_status_expiry_idx"), models.Index(fields=("category", "status"), name="product_category_status_idx"), models.Index(fields=("is_featured", "featured_position", "created_at"), name="product_sponsored_order_idx")]
     def __str__(self): return self.title
 class ProductImage(models.Model):
     product=models.ForeignKey(Product,on_delete=models.CASCADE,related_name="images"); image=models.ImageField(upload_to="products/"); alt_text=models.CharField(max_length=160,blank=True)

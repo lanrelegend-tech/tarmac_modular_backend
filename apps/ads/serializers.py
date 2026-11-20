@@ -6,6 +6,7 @@ from apps.accounts.models import User
 
 
 class AdCampaignSerializer(serializers.ModelSerializer):
+    PAGE_CHOICES = {"homepage", "marketplace", "lost_found", "announcements"}
     image = serializers.ImageField(write_only=True, required=False, allow_null=True)
     image_url = serializers.SerializerMethodField()
     advertiser_email = serializers.EmailField(write_only=True, required=False)
@@ -16,13 +17,14 @@ class AdCampaignSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AdCampaign
-        fields = ("id", "package", "package_name", "business_name", "advertiser_email", "owner_email", "advertiser_name", "pages", "display_image", "admin_amount_kobo", "price_kobo", "title", "description", "image", "image_url", "target_url", "placement", "status", "click_count", "impression_count", "starts_at", "ends_at", "created_at")
-        read_only_fields = ("id", "status", "price_kobo", "click_count", "impression_count", "created_at")
+        fields = ("id", "package", "package_name", "business_name", "advertiser_email", "owner_email", "advertiser_name", "pages", "display_image", "admin_amount_kobo", "price_kobo", "duration_days", "title", "description", "image", "image_url", "target_url", "placement", "status", "click_count", "impression_count", "starts_at", "ends_at", "created_at")
+        read_only_fields = ("id", "status", "price_kobo", "duration_days", "click_count", "impression_count", "created_at")
 
     def get_fields(self):
         fields = super().get_fields()
         request = self.context.get("request")
         if not (request and request.user.is_staff):
+            fields.pop("owner_email", None)
             fields["advertiser_email"].read_only = True
             fields["admin_amount_kobo"].read_only = True
         return fields
@@ -55,8 +57,9 @@ class AdCampaignSerializer(serializers.ModelSerializer):
             attrs["advertiser"] = request.user
         email = attrs.get("advertiser_email")
         if email:
-            advertiser = User.objects.filter(email__iexact=email, is_active=True, is_suspended=False, is_student_verified=True).first()
-            if advertiser is None:
+            advertiser = User.objects.filter(email__iexact=email, is_active=True, is_suspended=False).first()
+            from apps.accounts.permissions import is_student_feature_eligible
+            if not is_student_feature_eligible(advertiser):
                 raise serializers.ValidationError({"advertiser_email": "Choose an active verified student account."})
             attrs["advertiser"] = advertiser
             attrs.pop("advertiser_email", None)
@@ -64,8 +67,28 @@ class AdCampaignSerializer(serializers.ModelSerializer):
             if not is_admin: raise serializers.ValidationError({"admin_amount_kobo": "Only administrators can set campaign amounts."})
             attrs["price_kobo"] = attrs.pop("admin_amount_kobo")
         package = attrs.get("package", getattr(self.instance, "package", None))
+        if self.instance and not is_admin:
+            if "package" in attrs and getattr(attrs["package"], "pk", None) != self.instance.package_id:
+                raise serializers.ValidationError({"package": "An ad plan cannot be changed after campaign submission."})
+            if "pages" in attrs and attrs["pages"] != self.instance.pages:
+                raise serializers.ValidationError({"pages": "Ad placements cannot be changed after campaign submission."})
         if package and not package.is_active:
             raise serializers.ValidationError({"package": "Choose an active advertising package."})
+        existing_pages = getattr(self.instance, "pages", None)
+        pages = attrs.get("pages", existing_pages)
+        if pages is None:
+            pages = list(package.allowed_pages[:package.max_pages]) if package else (
+                ["lost_found"] if attrs.get("placement", AdCampaign.Placement.MARKETPLACE) == AdCampaign.Placement.LOST_FOUND else ["marketplace"]
+            )
+        if not isinstance(pages, list) or not pages or len(pages) > len(self.PAGE_CHOICES):
+            raise serializers.ValidationError({"pages": "Choose one or more unique advertising pages."})
+        if any(not isinstance(page, str) or page not in self.PAGE_CHOICES for page in pages):
+            raise serializers.ValidationError({"pages": "Choose valid advertising pages."})
+        if len(set(pages)) != len(pages):
+            raise serializers.ValidationError({"pages": "Choose one or more unique advertising pages."})
+        if package and (len(pages) > package.max_pages or not set(pages).issubset(set(package.allowed_pages))):
+            raise serializers.ValidationError({"pages": "Selected pages are not included in this advertising plan."})
+        attrs["pages"] = pages
         starts = attrs.get("starts_at", getattr(self.instance, "starts_at", None))
         ends = attrs.get("ends_at", getattr(self.instance, "ends_at", None))
         if starts and ends and ends <= starts:
