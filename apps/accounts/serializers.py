@@ -179,7 +179,7 @@ class StudentVerificationSerializer(serializers.ModelSerializer):
     student_id_image = serializers.ImageField(write_only=True, required=False, allow_null=True)
     profile_picture = serializers.ImageField(write_only=True, required=False, allow_null=True)
     profile_photo_consent = serializers.BooleanField(write_only=True, required=False)
-    class Meta: model=StudentVerification; fields=("id","student_id_image","profile_picture","profile_photo_consent","submitted_matric_number","requested_affiliation","status","created_at"); read_only_fields=("status","created_at")
+    class Meta: model=StudentVerification; fields=("id","student_id_image","profile_picture","profile_photo_consent","submitted_matric_number","requested_affiliation","status","reviewer_note","created_at"); read_only_fields=("status","reviewer_note","created_at")
 
     def validate(self, attrs):
         user = self.context["request"].user
@@ -213,7 +213,12 @@ class StudentVerificationSerializer(serializers.ModelSerializer):
         value = value.strip().upper()
         current_user = self.context["request"].user
         if current_user.matric_number and current_user.matric_number.casefold() != value.casefold():
-            raise serializers.ValidationError("This must match the matriculation number used to create your account. Contact an administrator if it needs correction.")
+            has_previous_rejection = StudentVerification.objects.filter(
+                user=current_user,
+                status=StudentVerification.Status.REJECTED,
+            ).exists()
+            if current_user.is_student_verified or not has_previous_rejection:
+                raise serializers.ValidationError("This must match the matriculation number used to create your account. Contact an administrator if it needs correction.")
         duplicates = StudentVerification.objects.filter(submitted_matric_number__iexact=value).exclude(user=current_user)
         if duplicates.exists():
             raise serializers.ValidationError("This matric number is already linked to another account. Contact the school administrator if this is an error.")

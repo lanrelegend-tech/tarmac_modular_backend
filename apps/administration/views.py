@@ -32,7 +32,8 @@ from apps.messaging.serializers import MessageSerializer
 from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
 from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminAdministratorSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
-from apps.notifications.services import notify_user
+from apps.notifications.services import notify_user, dispatch_notification
+from apps.notifications.models import Notification
 class UserReportViewSet(viewsets.ModelViewSet):
     serializer_class=UserReportSerializer
     http_method_names = ["get", "post", "patch", "head", "options"]
@@ -188,7 +189,18 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
         verification.save(update_fields=fields_to_save)
         AdminLog.objects.create(actor=self.request.user, action=f"student_verification_{status_value}", target_type="StudentVerification", target_id=str(verification.pk), metadata={"user_id": user.pk})
         approved_label = "alumni" if verification.requested_affiliation == "alumni" else "student"
-        notify_user(user, "Tarmac verification reviewed", f"Your {approved_label} verification was approved." if status_value == StudentVerification.Status.APPROVED else "Your verification needs attention. Sign in to review the school's note.", {"kind": "verification_review", "status": status_value}, f"verification-reviewed:{verification.pk}:{status_value}")
+        if status_value == StudentVerification.Status.APPROVED:
+            subject = "Your Tarmac verification was approved"
+            body = f"Your {approved_label} verification was approved. Your account now has its verified {approved_label} status. Sign in to continue using Tarmac."
+        else:
+            subject = "Your Tarmac verification needs changes"
+            reason = verification.reviewer_note or "The submitted details need correction. Contact Tarmac Support if you need help."
+            body = f"Your verification was not approved. Administrator's reason: {reason}\n\nPlease correct the issue and submit a new verification request. Your student ID image has been deleted. If the note concerns account details you cannot edit, contact Tarmac Support before resubmitting."
+        event_key = f"verification-reviewed:{verification.pk}:{status_value}"
+        notify_user(user, subject, body, {"kind": "verification_review", "status": status_value, "reviewer_note": verification.reviewer_note, "verification_id": verification.pk}, event_key)
+        email_notification_id = Notification.objects.filter(dedupe_key=f"{event_key}:email").values_list("pk", flat=True).first()
+        if email_notification_id:
+            transaction.on_commit(lambda notification_id=email_notification_id: dispatch_notification(notification_id))
 
     @action(detail=True, methods=["get"], url_path="student-id")
     def student_id(self, request, pk=None):

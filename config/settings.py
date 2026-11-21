@@ -102,7 +102,7 @@ AUTH_COOKIE_SECURE = (os.getenv("AUTH_COOKIE_SECURE") or ("False" if DEBUG else 
 AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE") or ("Lax" if DEBUG else "None")
 AUTH_ACCESS_COOKIE = os.getenv("AUTH_ACCESS_COOKIE", "tarmac_access")
 AUTH_REFRESH_COOKIE = os.getenv("AUTH_REFRESH_COOKIE", "tarmac_refresh")
-CSRF_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
+CSRF_COOKIE_SAMESITE = os.getenv("CSRF_COOKIE_SAMESITE") or ("Lax" if DEBUG else "None")
 CSRF_COOKIE_HTTPONLY = True
 if AUTH_COOKIE_SAMESITE == "None" and not AUTH_COOKIE_SECURE:
     raise ImproperlyConfigured("SameSite=None auth cookies require AUTH_COOKIE_SECURE=True.")

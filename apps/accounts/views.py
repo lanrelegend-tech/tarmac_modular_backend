@@ -285,7 +285,7 @@ def resend_verification_email(request):
     return Response({"detail": "If that email belongs to an unverified Tarmac account, another verification link will be sent."})
 class VerificationViewSet(viewsets.ModelViewSet):
     serializer_class=StudentVerificationSerializer; permission_classes=[permissions.IsAuthenticated]
-    def get_queryset(self): return StudentVerification.objects.filter(user=self.request.user)
+    def get_queryset(self): return StudentVerification.objects.filter(user=self.request.user).order_by("-created_at", "-pk")
     @transaction.atomic
     def perform_update(self, serializer):
         if serializer.validated_data.get("student_id_image") and serializer.instance.student_id_image:

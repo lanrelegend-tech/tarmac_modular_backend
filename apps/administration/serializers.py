@@ -162,6 +162,16 @@ class AdminVerificationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Choose approved or rejected.")
         return status
 
+    def validate(self, attrs):
+        status = attrs.get("status", getattr(self.instance, "status", None))
+        note = str(attrs.get("reviewer_note", getattr(self.instance, "reviewer_note", ""))).strip()
+        if status == StudentVerification.Status.REJECTED and not note:
+            raise serializers.ValidationError({"reviewer_note": "Give the student a reason and tell them what to correct before rejecting."})
+        if len(note) > 3000:
+            raise serializers.ValidationError({"reviewer_note": "Keep the review note under 3,000 characters."})
+        attrs["reviewer_note"] = note
+        return attrs
+
 class AdminReviewSerializer(serializers.ModelSerializer):
     reviewer_name = serializers.SerializerMethodField()
     seller_name = serializers.SerializerMethodField()

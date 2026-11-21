@@ -179,7 +179,10 @@ def _send_email(notification):
         action_url = f"{origin}/messages?conversation={conversation_id}" if conversation_id else f"{origin}/messages"
         action_label = "Open Tarmac conversation"
     elif kind == "verification_review":
-        action_url, action_label = f"{origin}/verify-student", "View verification status"
+        if data.get("status") == "rejected":
+            action_url, action_label = f"{origin}/verify-student?resubmit=1", "Review and resubmit verification"
+        else:
+            action_url, action_label = f"{origin}/dashboard", "Continue to Tarmac"
     elif kind in ("item_claim", "item_claim_review"):
         action_url, action_label = f"{origin}/lost-found", "Review item claim"
     elif kind.startswith("support"):
