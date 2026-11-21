@@ -114,15 +114,10 @@ SECURE_HSTS_PRELOAD = False
 if os.getenv("TRUST_PROXY_SSL_HEADER", "False").lower() == "true":
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND") or ("django.core.mail.backends.console.EmailBackend" if DEBUG else "django.core.mail.backends.smtp.EmailBackend")
-EMAIL_HOST = os.getenv("EMAIL_HOST", "")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() == "true"
-EMAIL_TIMEOUT = 10
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL") or "Tarmac <noreply@localhost>"
-if not DEBUG and (not EMAIL_HOST or not os.getenv("DEFAULT_FROM_EMAIL")):
-    raise ImproperlyConfigured("Configure EMAIL_HOST and DEFAULT_FROM_EMAIL for production notifications.")
+if not DEBUG and (not RESEND_API_KEY or not os.getenv("DEFAULT_FROM_EMAIL")):
+    raise ImproperlyConfigured("Configure RESEND_API_KEY and DEFAULT_FROM_EMAIL for production notifications.")
 PAYSTACK_ENABLED_DEFAULT = os.getenv("PAYSTACK_ENABLED_DEFAULT", "True" if os.getenv("PAYSTACK_SECRET_KEY") and os.getenv("PAYSTACK_WEBHOOK_SECRET") else "False").lower() == "true"
 if not DEBUG and PAYSTACK_ENABLED_DEFAULT and (not os.getenv("PAYSTACK_SECRET_KEY") or not os.getenv("PAYSTACK_WEBHOOK_SECRET")):
     raise ImproperlyConfigured("Paystack is enabled by default; configure transaction and webhook secrets or set PAYSTACK_ENABLED_DEFAULT=False.")

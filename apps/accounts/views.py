@@ -272,12 +272,17 @@ def confirm_password_reset(request):
 
 @api_view(["POST"])
 @throttle_classes([AccountActionThrottle])
-@permission_classes([permissions.IsAuthenticated])
+@permission_classes([permissions.AllowAny])
 def resend_verification_email(request):
-    if request.user.email_verified:
-        return Response({"email_verified": True})
-    issue_account_action_token(request.user, AccountActionToken.Purpose.EMAIL_VERIFY)
-    return Response({"detail": "Verification instructions have been sent if email delivery is available."})
+    if request.user.is_authenticated:
+        user = request.user
+    else:
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = User.objects.filter(email__iexact=serializer.validated_data["email"], is_active=True).first()
+    if user and not user.email_verified and not user.is_suspended:
+        issue_account_action_token(user, AccountActionToken.Purpose.EMAIL_VERIFY)
+    return Response({"detail": "If that email belongs to an unverified Tarmac account, another verification link will be sent."})
 class VerificationViewSet(viewsets.ModelViewSet):
     serializer_class=StudentVerificationSerializer; permission_classes=[permissions.IsAuthenticated]
     def get_queryset(self): return StudentVerification.objects.filter(user=self.request.user)
