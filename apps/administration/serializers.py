@@ -4,6 +4,7 @@ from django.utils import timezone
 from apps.accounts.models import StudentVerification, User, AnonymousMarketplaceIdentity
 from apps.reviews.models import ReviewReport, SellerReview
 from .models import UserReport,ReportEvidence,Announcement,AdminLog,SupportTicket,SupportMessage,SupportAttachment,PlatformSettings,SubscriptionPlan,StudentSubscription,default_notification_channels
+from apps.ads.models import AdPlacement
 class UserReportSerializer(serializers.ModelSerializer):
     evidence_images = serializers.ListField(child=serializers.ImageField(), write_only=True, required=False, max_length=5)
     evidence = serializers.SerializerMethodField()
@@ -259,26 +260,37 @@ class AdminConversationSerializer(serializers.ModelSerializer):
         return AdminConversationMessageSerializer(list(reversed(messages)), many=True, context=self.context).data
 
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
-    PAGE_CHOICES = {"homepage", "marketplace", "lost_found", "announcements"}
-    class Meta: model = SubscriptionPlan; fields = ("id", "name", "description", "price_kobo", "duration_days", "placement", "allowed_pages", "max_pages", "max_images", "visibility", "features", "is_popular", "color", "is_active", "created_at", "updated_at"); read_only_fields = ("id", "created_at", "updated_at")
+    PAGE_CHOICES = {"homepage", "marketplace", "lost_found", "announcements", "jobs"}
+    class Meta: model = SubscriptionPlan; fields = ("id", "name", "description", "price_kobo", "duration_days", "placement", "allowed_pages", "max_pages", "allowed_placements", "max_images", "visibility", "features", "is_popular", "color", "is_active", "created_at", "updated_at"); read_only_fields = ("id", "created_at", "updated_at")
     def validate_duration_days(self, value):
         if not 1 <= value <= 366: raise serializers.ValidationError("Duration must be between 1 and 366 days.")
         return value
     def validate_allowed_pages(self, value):
         if not isinstance(value, list) or not value or len(value) > len(self.PAGE_CHOICES):
-            raise serializers.ValidationError("Choose between 1 and 4 advertising pages.")
+            raise serializers.ValidationError("Choose between 1 and 5 advertising pages.")
         if any(not isinstance(page, str) or page not in self.PAGE_CHOICES for page in value):
             raise serializers.ValidationError("Choose valid advertising pages.")
         if len(set(value)) != len(value):
             raise serializers.ValidationError("Choose valid, unique advertising pages.")
         return value
+    def validate_allowed_placements(self, value):
+        if not isinstance(value, list) or any(not isinstance(key, str) for key in value):
+            raise serializers.ValidationError("Choose valid advertising placements.")
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("Choose unique advertising placements.")
+        valid = set(AdPlacement.objects.filter(is_active=True).values_list("key", flat=True))
+        if any(not isinstance(key, str) or key not in valid for key in value):
+            raise serializers.ValidationError("Choose active advertising placements.")
+        return value
     def validate(self, attrs):
         pages = attrs.get("allowed_pages", getattr(self.instance, "allowed_pages", []))
+        placements = attrs.get("allowed_placements", getattr(self.instance, "allowed_placements", []))
         max_pages = attrs.get("max_pages", getattr(self.instance, "max_pages", 1))
         if not pages:
             raise serializers.ValidationError({"allowed_pages": "Choose at least one page for this plan."})
-        if not 1 <= max_pages <= len(pages):
-            raise serializers.ValidationError({"max_pages": "Maximum pages must be between 1 and the number of selected pages."})
+        limit = len(placements) if placements else len(pages)
+        if not 1 <= max_pages <= limit:
+            raise serializers.ValidationError({"max_pages": "Maximum placements must be between 1 and the number of eligible placements."})
         return attrs
 
 class StudentSubscriptionSerializer(serializers.ModelSerializer):
@@ -402,10 +414,12 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
         return value
 
 class AdminPaymentSerializer(serializers.ModelSerializer):
-    user_email = serializers.EmailField(source="user.email", read_only=True)
+    user_email = serializers.SerializerMethodField()
     product_title = serializers.CharField(source="product.title", read_only=True, allow_null=True)
     advertisement_title = serializers.CharField(source="advertisement.title", read_only=True, allow_null=True)
     subscription_plan_name = serializers.CharField(source="subscription_plan.name", read_only=True, allow_null=True)
+    def get_user_email(self, obj):
+        return obj.user.email if obj.user_id else obj.payer_email
     class Meta:
         from apps.payments.models import Payment
         model = Payment

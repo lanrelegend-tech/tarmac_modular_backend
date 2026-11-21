@@ -575,6 +575,8 @@ def system_status(request):
             "external_job_submissions": config.external_job_submissions_enabled,
             "messaging": config.messaging_enabled,
             "ads": config.ads_enabled,
+            "ad_fees_enabled": config.ad_fee_enabled,
+            "paystack_enabled": config.paystack_enabled,
             "ad_slide_duration_seconds": config.ad_slide_duration_seconds,
             "homepage_ads": config.homepage_ads_enabled,
             "marketplace_ads": config.marketplace_ads_enabled,

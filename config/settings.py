@@ -132,7 +132,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend", "rest_framework.filters.SearchFilter", "rest_framework.filters.OrderingFilter"],
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"anon": os.getenv("ANON_THROTTLE_RATE", "30/hour"), "user": os.getenv("USER_THROTTLE_RATE", "1000/day"), "payment_initialization": "10/hour", "account_action": "10/hour", "presence": "40/hour", "external_job_submission": "5/hour", "external_job_manage": "30/hour"},
+    "DEFAULT_THROTTLE_RATES": {"anon": os.getenv("ANON_THROTTLE_RATE", "30/hour"), "user": os.getenv("USER_THROTTLE_RATE", "1000/day"), "payment_initialization": "10/hour", "external_ad_submission": "5/hour", "external_ad_payment": "10/hour", "external_ad_manage": "30/hour", "account_action": "10/hour", "presence": "40/hour", "external_job_submission": "5/hour", "external_job_manage": "30/hour"},
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": int(os.getenv("API_PAGE_SIZE", "25")),
 }

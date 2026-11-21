@@ -193,7 +193,7 @@ class SupportAttachment(models.Model):
         ordering = ("created_at",)
 
 class SubscriptionPlan(models.Model):
-    AD_PAGES = {"homepage", "marketplace", "lost_found", "announcements"}
+    AD_PAGES = {"homepage", "marketplace", "lost_found", "announcements", "jobs"}
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True)
     price_kobo = models.PositiveIntegerField(default=0)
@@ -201,6 +201,7 @@ class SubscriptionPlan(models.Model):
     placement = models.CharField(max_length=80, default="Marketplace")
     allowed_pages = models.JSONField(default=list, blank=True)
     max_pages = models.PositiveSmallIntegerField(default=1)
+    allowed_placements = models.JSONField(default=list, blank=True)
     max_images = models.PositiveSmallIntegerField(default=3)
     visibility = models.CharField(max_length=60, default="Standard")
     features = models.JSONField(default=list, blank=True)

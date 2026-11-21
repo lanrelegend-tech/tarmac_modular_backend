@@ -6,7 +6,7 @@ from rest_framework.exceptions import ValidationError
 from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import viewsets, permissions
-from apps.accounts.permissions import IsVerifiedStudent
+from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.models import PlatformSettings, AdminLog
 from apps.administration.permissions import PlatformFeatureEnabled
 from rest_framework.decorators import action
@@ -64,7 +64,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             available = available.filter(is_featured=True).filter(Q(featured_until__isnull=True) | Q(featured_until__gt=timezone.now()))
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
         if self.action == "list" and self.request.query_params.get("featured") == "true":
-            if not platform.featured_products_enabled:
+            if not platform.featured_products_enabled or not platform.sponsored_products_enabled:
                 return Product.objects.none()
             available = available.filter(is_featured=True).filter(Q(featured_until__isnull=True) | Q(featured_until__gt=timezone.now()))
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
@@ -120,6 +120,11 @@ class ProductImageViewSet(viewsets.ModelViewSet):
             seller_access &= Q(product__seller__is_student_verified=True)
         available = ProductImage.objects.filter(product__status=Product.Status.ACTIVE, product__visibility=Product.Visibility.PUBLIC, product__seller__is_active=True, product__seller__is_suspended=False, product__category__is_active=True, product__category__is_allowed_for_sale=True).filter(seller_access).filter(Q(product__identity_type=Product.IdentityType.NORMAL)|Q(product__anonymous_identity__is_enabled=True)).filter(Q(product__expires_at__isnull=True)|Q(product__expires_at__gt=timezone.now()))
         invited = ProductImage.objects.filter(product__status=Product.Status.ACTIVE, product__visibility=Product.Visibility.INVITE_ONLY, product__audience_grants__user=self.request.user, product__seller__is_active=True, product__seller__is_suspended=False).filter(seller_access).filter(Q(product__identity_type=Product.IdentityType.NORMAL)|Q(product__anonymous_identity__is_enabled=True)).filter(Q(product__expires_at__isnull=True)|Q(product__expires_at__gt=timezone.now()))
+        if self.action == "file" and not is_student_feature_eligible(self.request.user):
+            if not platform.featured_products_enabled or not platform.sponsored_products_enabled:
+                return ProductImage.objects.none()
+            public_featured = available.filter(product__is_featured=True).filter(Q(product__featured_until__isnull=True) | Q(product__featured_until__gt=timezone.now()))
+            return public_featured
         return available | invited | ProductImage.objects.filter(product__seller=self.request.user)
     @action(detail=True, methods=["get"], url_path="file")
     def file(self, request, pk=None):

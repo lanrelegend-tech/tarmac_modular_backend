@@ -1,4 +1,6 @@
 import os
+import hashlib
+import secrets
 import requests
 from datetime import timedelta
 from django.db import transaction
@@ -13,14 +15,23 @@ from apps.administration.models import SubscriptionPlan
 from apps.administration.platform import FeatureUnavailable
 from apps.products.models import Product
 from apps.ads.models import AdCampaign
+from apps.ads.models import AdAdvertiser, AdPlacement, AdSlotHold
+from apps.ads.services import get_slot_availability
 from .models import Payment
 from .serializers import PaymentSerializer
 from .throttles import PaymentInitializationThrottle
+from apps.ads.throttles import PublicAdPaymentThrottle
 class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class=PaymentSerializer; permission_classes=[IsVerifiedStudent]
     def get_queryset(self): return Payment.objects.filter(user=self.request.user)
+    def get_permissions(self):
+        if getattr(self, "action", None) == "initialize_external_ad":
+            return [permissions.AllowAny()]
+        return [IsVerifiedStudent()]
     def get_throttles(self):
-        if getattr(self, "action", None) == "initialize_listing_fee":
+        if getattr(self, "action", None) in ("initialize_listing_fee", "initialize_external_ad"):
+            if getattr(self, "action", None) == "initialize_external_ad":
+                return [PublicAdPaymentThrottle()]
             return [PaymentInitializationThrottle()]
         return super().get_throttles()
 
@@ -69,6 +80,68 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         try:
             response = requests.post("https://api.paystack.co/transaction/initialize", json=payload,
                                      headers={"Authorization": f"Bearer {secret}"}, timeout=15)
+            response.raise_for_status()
+            provider_response = response.json()
+            if not provider_response.get("status") or not provider_response.get("data", {}).get("authorization_url"):
+                raise RuntimeError(provider_response.get("message", "Paystack did not return a checkout URL."))
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            payment.status = Payment.Status.FAILED
+            payment.provider_response = {"error": str(exc)[:1000]}
+            payment.save(update_fields=("status", "provider_response"))
+            return Response({"detail": "Could not initialize payment. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
+        payment.provider_response = provider_response
+        payment.save(update_fields=("provider_response",))
+        return Response({"reference": payment.reference, "authorization_url": provider_response["data"]["authorization_url"]}, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"], url_path="initialize-external-ad")
+    @transaction.atomic
+    def initialize_external_ad(self, request):
+        token = str(request.data.get("token", "")).strip()
+        try:
+            campaign_id = int(request.data.get("campaign"))
+        except (TypeError, ValueError):
+            raise ValidationError({"campaign": "Provide a valid campaign ID."})
+        advertiser = AdAdvertiser.objects.filter(management_token_hash=hashlib.sha256(token.encode()).hexdigest()).first() if token else None
+        if not advertiser:
+            raise PermissionDenied("This private campaign link is invalid or expired.")
+        campaign = AdCampaign.objects.select_for_update().select_related("package", "ad_placement").filter(pk=campaign_id, business_advertiser=advertiser).first()
+        if not campaign or campaign.status != AdCampaign.Status.PENDING_PAYMENT or not campaign.approved_at:
+            raise ValidationError({"campaign": "Only approved campaigns awaiting payment can be paid."})
+        platform = PlatformSettings.get_solo()
+        if not platform.ads_enabled:
+            raise FeatureUnavailable("Advertising is currently disabled.")
+        if not platform.ad_fee_enabled or not platform.paystack_enabled:
+            campaign.price_kobo = 0
+            campaign.status = AdCampaign.Status.SCHEDULED if campaign.starts_at and campaign.starts_at > timezone.now() else AdCampaign.Status.ACTIVE
+            campaign.save(update_fields=("price_kobo", "status", "updated_at"))
+            AdSlotHold.objects.filter(campaign=campaign).delete()
+            return Response({"free": True, "status": campaign.status})
+        placements = list(campaign.ad_placements.order_by("pk")) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
+        if not placements:
+            raise ValidationError({"campaign": "This campaign has no assigned advertising slot."})
+        placements = list(AdPlacement.objects.select_for_update().filter(pk__in=[item.pk for item in placements]).order_by("pk"))
+        holds = {hold.placement_id: hold for hold in AdSlotHold.objects.filter(campaign=campaign)}
+        now = timezone.now()
+        if any(not holds.get(slot.pk) or holds[slot.pk].expires_at <= now for slot in placements):
+            full_slots = [slot for slot in placements if get_slot_availability(slot, campaign.starts_at, campaign.ends_at, exclude_campaign_id=campaign.pk)["remaining"] <= 0]
+            if full_slots:
+                AdSlotHold.objects.filter(campaign=campaign, is_confirmed=False).delete()
+                raise ValidationError({"availability": f"Temporary slot holds expired and these dates are now fully booked for {', '.join(slot.position for slot in full_slots)}. Join the waitlist."})
+        for slot in placements:
+            AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": campaign.starts_at, "ends_at": campaign.ends_at, "expires_at": now + timedelta(minutes=30), "is_confirmed": False})
+        existing = Payment.objects.filter(advertisement=campaign, status=Payment.Status.INITIALIZED).order_by("-created_at").first()
+        if existing and existing.provider_response.get("data", {}).get("authorization_url"):
+            return Response({"reference": existing.reference, "authorization_url": existing.provider_response["data"]["authorization_url"]})
+        secret = os.getenv("PAYSTACK_SECRET_KEY")
+        if not secret:
+            raise APIException("Paystack payments are not configured. Contact Tarmac Support.")
+        payment = Payment.objects.create(user=None, payer_email=advertiser.email, advertisement=campaign, amount_kobo=campaign.price_kobo)
+        payload = {"email": advertiser.email, "amount": payment.amount_kobo, "currency": payment.currency, "reference": payment.reference, "metadata": {"advertisement_id": campaign.pk, "external_advertiser": True}}
+        callback_url = os.getenv("PAYSTACK_CALLBACK_URL", "")
+        if callback_url:
+            payload["callback_url"] = callback_url
+        try:
+            response = requests.post("https://api.paystack.co/transaction/initialize", json=payload, headers={"Authorization": f"Bearer {secret}"}, timeout=15)
             response.raise_for_status()
             provider_response = response.json()
             if not provider_response.get("status") or not provider_response.get("data", {}).get("authorization_url"):

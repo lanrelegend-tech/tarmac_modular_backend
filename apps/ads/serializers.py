@@ -1,24 +1,27 @@
 from django.conf import settings
 from rest_framework import serializers
 
-from .models import AdCampaign
+from .models import AdCampaign, AdAdvertiser, AdPlacement, AdWaitlistEntry
 from apps.accounts.models import User
 
 
 class AdCampaignSerializer(serializers.ModelSerializer):
-    PAGE_CHOICES = {"homepage", "marketplace", "lost_found", "announcements"}
+    PAGE_CHOICES = {"homepage", "marketplace", "lost_found", "announcements", "jobs"}
     image = serializers.ImageField(write_only=True, required=False, allow_null=True)
     image_url = serializers.SerializerMethodField()
     advertiser_email = serializers.EmailField(write_only=True, required=False)
-    owner_email = serializers.EmailField(source="advertiser.email", read_only=True)
+    owner_email = serializers.SerializerMethodField()
     advertiser_name = serializers.SerializerMethodField()
     package_name = serializers.CharField(source="package.name", read_only=True, allow_null=True)
+    placement_key = serializers.CharField(source="ad_placement.key", read_only=True, allow_null=True)
+    ad_placements = serializers.PrimaryKeyRelatedField(many=True, queryset=AdPlacement.objects.filter(is_active=True), required=False)
+    placement_keys = serializers.SerializerMethodField()
     admin_amount_kobo = serializers.IntegerField(write_only=True, required=False, min_value=0)
 
     class Meta:
         model = AdCampaign
-        fields = ("id", "package", "package_name", "business_name", "advertiser_email", "owner_email", "advertiser_name", "pages", "display_image", "admin_amount_kobo", "price_kobo", "duration_days", "title", "description", "image", "image_url", "target_url", "placement", "status", "click_count", "impression_count", "starts_at", "ends_at", "created_at")
-        read_only_fields = ("id", "status", "price_kobo", "duration_days", "click_count", "impression_count", "created_at")
+        fields = ("id", "package", "package_name", "business_name", "advertiser_email", "owner_email", "advertiser_name", "pages", "ad_placement", "ad_placements", "placement_key", "placement_keys", "business_advertiser", "display_image", "admin_amount_kobo", "price_kobo", "duration_days", "title", "description", "image", "image_url", "target_url", "placement", "status", "click_count", "impression_count", "starts_at", "ends_at", "approved_at", "created_at")
+        read_only_fields = ("id", "status", "price_kobo", "duration_days", "click_count", "impression_count", "approved_at", "business_advertiser", "created_at")
 
     def get_fields(self):
         fields = super().get_fields()
@@ -36,7 +39,21 @@ class AdCampaignSerializer(serializers.ModelSerializer):
         path = f"/api/ads/{obj.pk}/image/"
         return request.build_absolute_uri(path) if request else path
 
-    def get_advertiser_name(self, obj): return obj.advertiser.get_full_name().strip() or obj.advertiser.username
+    def get_advertiser_name(self, obj):
+        if obj.business_advertiser_id:
+            return obj.business_advertiser.business_name
+        return obj.advertiser.get_full_name().strip() or obj.advertiser.username if obj.advertiser_id else "Tarmac advertiser"
+
+    def get_owner_email(self, obj):
+        if obj.business_advertiser_id:
+            return obj.business_advertiser.email
+        return obj.advertiser.email if obj.advertiser_id else ""
+
+    def get_placement_keys(self, obj):
+        keys = list(obj.ad_placements.values_list("key", flat=True))
+        if not keys and obj.ad_placement_id:
+            keys = [obj.ad_placement.key]
+        return keys
 
     def validate_image(self, image):
         if image.size > 5 * 1024 * 1024:
@@ -67,6 +84,15 @@ class AdCampaignSerializer(serializers.ModelSerializer):
             if not is_admin: raise serializers.ValidationError({"admin_amount_kobo": "Only administrators can set campaign amounts."})
             attrs["price_kobo"] = attrs.pop("admin_amount_kobo")
         package = attrs.get("package", getattr(self.instance, "package", None))
+        placement = attrs.get("ad_placement", getattr(self.instance, "ad_placement", None))
+        placements = attrs.get("ad_placements")
+        if placements is None and self.instance:
+            placements = list(self.instance.ad_placements.all())
+        placements = list(placements or [])
+        if placement and not placements:
+            placements = [placement]
+        if not placement and placements:
+            placement = placements[0]
         if self.instance and not is_admin:
             if "package" in attrs and getattr(attrs["package"], "pk", None) != self.instance.package_id:
                 raise serializers.ValidationError({"package": "An ad plan cannot be changed after campaign submission."})
@@ -74,6 +100,27 @@ class AdCampaignSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"pages": "Ad placements cannot be changed after campaign submission."})
         if package and not package.is_active:
             raise serializers.ValidationError({"package": "Choose an active advertising package."})
+        if placement:
+            if not placement.is_active:
+                raise serializers.ValidationError({"ad_placement": "This advertising placement is unavailable."})
+        if placements:
+            if any(not item.is_active for item in placements):
+                raise serializers.ValidationError({"ad_placements": "One or more advertising placements are unavailable."})
+            if len({item.pk for item in placements}) != len(placements):
+                raise serializers.ValidationError({"ad_placements": "Choose each placement only once."})
+            if package and len(placements) > package.max_pages:
+                raise serializers.ValidationError({"ad_placements": f"This plan allows at most {package.max_pages} placement(s)."})
+            allowed = set(package.allowed_placements or []) if package else set()
+            if package and not allowed:
+                allowed_pages = set(package.allowed_pages or [])
+                allowed = {item.key for item in placements if item.page in allowed_pages}
+            if package and any(item.key not in allowed for item in placements):
+                raise serializers.ValidationError({"ad_placements": "One or more placements are not included in this plan."})
+            attrs["ad_placements"] = placements
+            attrs["ad_placement"] = placement
+            attrs["pages"] = sorted({item.page for item in placements})
+        if placement:
+            attrs["placement"] = placement.page
         existing_pages = getattr(self.instance, "pages", None)
         pages = attrs.get("pages", existing_pages)
         if pages is None:
@@ -94,3 +141,32 @@ class AdCampaignSerializer(serializers.ModelSerializer):
         if starts and ends and ends <= starts:
             raise serializers.ValidationError({"ends_at": "End time must be after start time."})
         return attrs
+
+
+class AdPlacementSerializer(serializers.ModelSerializer):
+    page_label = serializers.CharField(source="get_page_display", read_only=True)
+
+    class Meta:
+        model = AdPlacement
+        fields = ("id", "key", "page", "page_label", "position", "description", "max_slots", "limited_slots_threshold", "is_active", "is_exclusive", "sort_order", "created_at", "updated_at")
+        read_only_fields = ("id", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        max_slots = attrs.get("max_slots", getattr(self.instance, "max_slots", 5))
+        limited = attrs.get("limited_slots_threshold", getattr(self.instance, "limited_slots_threshold", 2))
+        if max_slots < 1 or not 0 <= limited <= max_slots:
+            raise serializers.ValidationError({"max_slots": "Capacity must be positive and the limited-slots threshold cannot exceed it."})
+        return attrs
+
+
+class AdWaitlistEntrySerializer(serializers.ModelSerializer):
+    business_name = serializers.CharField(source="advertiser.business_name", read_only=True)
+    contact_name = serializers.CharField(source="advertiser.contact_name", read_only=True)
+    email = serializers.EmailField(source="advertiser.email", read_only=True)
+    placement_key = serializers.CharField(source="placement.key", read_only=True)
+    placement_name = serializers.CharField(source="placement.position", read_only=True)
+
+    class Meta:
+        model = AdWaitlistEntry
+        fields = ("id", "business_name", "contact_name", "email", "placement", "placement_key", "placement_name", "starts_at", "ends_at", "status", "offer_expires_at", "created_at")
+        read_only_fields = fields
