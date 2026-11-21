@@ -149,7 +149,7 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "patch", "head", "options"]
 
     def get_queryset(self):
-        queryset = StudentVerification.objects.select_related("user", "reviewed_by").order_by("status", "created_at")
+        queryset = StudentVerification.objects.select_related("user", "user__course", "reviewed_by").order_by("status", "created_at")
         status_filter = self.request.query_params.get("status")
         return queryset.filter(status=status_filter) if status_filter else queryset
 

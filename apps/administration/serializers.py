@@ -140,11 +140,17 @@ class AdminLogSerializer(serializers.ModelSerializer):
 
 class AdminVerificationSerializer(serializers.ModelSerializer):
     student_id_image_url = serializers.SerializerMethodField()
+    student_profile_picture_url = serializers.SerializerMethodField()
     student_email = serializers.EmailField(source="user.email", read_only=True)
     student_name = serializers.SerializerMethodField()
+    student_department = serializers.CharField(source="user.department", read_only=True)
+    student_faculty = serializers.CharField(source="user.faculty", read_only=True)
+    student_level = serializers.CharField(source="user.level", read_only=True)
+    student_course_name = serializers.CharField(source="user.course.name", read_only=True, allow_null=True)
+    student_entry_year = serializers.IntegerField(source="user.entry_year", read_only=True, allow_null=True)
     class Meta:
         model = StudentVerification
-        fields = ("id", "user", "student_email", "student_name", "submitted_matric_number", "requested_affiliation", "student_id_image_url", "status", "reviewer_note", "created_at", "reviewed_by", "reviewed_at")
+        fields = ("id", "user", "student_email", "student_name", "submitted_matric_number", "requested_affiliation", "student_department", "student_faculty", "student_level", "student_course_name", "student_entry_year", "student_profile_picture_url", "student_id_image_url", "status", "reviewer_note", "created_at", "reviewed_by", "reviewed_at")
         read_only_fields = ("id", "user", "submitted_matric_number", "student_id_image_url", "created_at", "reviewed_by", "reviewed_at")
 
     def get_student_id_image_url(self, obj):
@@ -152,6 +158,13 @@ class AdminVerificationSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get("request")
         path = f"/api/admin-tools/verifications/{obj.pk}/student-id/"
+        return request.build_absolute_uri(path) if request else path
+
+    def get_student_profile_picture_url(self, obj):
+        if not obj.user.profile_picture:
+            return None
+        request = self.context.get("request")
+        path = f"/api/accounts/profile-image/{obj.user.public_id}/"
         return request.build_absolute_uri(path) if request else path
 
     def get_student_name(self, obj):

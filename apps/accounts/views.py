@@ -221,7 +221,8 @@ def student_id_image(request, verification_id):
 def profile_image(request, user_id):
     target = get_object_or_404(User, public_id=user_id, is_active=True)
     is_owner = request.user.pk == target.pk
-    if not is_owner and not (target.public_profile_enabled and target.public_profile_picture_enabled and is_student_feature_eligible(request.user) and is_student_feature_eligible(target)):
+    is_admin = request.user.is_staff or request.user.is_superuser
+    if not is_owner and not is_admin and not (target.public_profile_enabled and target.public_profile_picture_enabled and is_student_feature_eligible(request.user) and is_student_feature_eligible(target)):
         from rest_framework.exceptions import PermissionDenied
         raise PermissionDenied("An active verified student account is required to view another student's profile image.")
     if not target.profile_picture:
