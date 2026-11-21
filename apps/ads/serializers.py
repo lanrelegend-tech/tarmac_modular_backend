@@ -1,4 +1,6 @@
 from django.conf import settings
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 from rest_framework import serializers
 
 from .models import AdCampaign, AdAdvertiser, AdPlacement, AdWaitlistEntry
@@ -17,11 +19,14 @@ class AdCampaignSerializer(serializers.ModelSerializer):
     ad_placements = serializers.PrimaryKeyRelatedField(many=True, queryset=AdPlacement.objects.filter(is_active=True), required=False)
     placement_keys = serializers.SerializerMethodField()
     admin_amount_kobo = serializers.IntegerField(write_only=True, required=False, min_value=0)
+    has_successful_payment = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
+    refund_status = serializers.SerializerMethodField()
 
     class Meta:
         model = AdCampaign
-        fields = ("id", "package", "package_name", "business_name", "advertiser_email", "owner_email", "advertiser_name", "pages", "ad_placement", "ad_placements", "placement_key", "placement_keys", "business_advertiser", "display_image", "admin_amount_kobo", "price_kobo", "duration_days", "title", "description", "image", "image_url", "target_url", "placement", "status", "click_count", "impression_count", "starts_at", "ends_at", "approved_at", "created_at")
-        read_only_fields = ("id", "status", "price_kobo", "duration_days", "click_count", "impression_count", "approved_at", "business_advertiser", "created_at")
+        fields = ("id", "package", "package_name", "business_name", "advertiser_email", "owner_email", "advertiser_name", "pages", "ad_placement", "ad_placements", "placement_key", "placement_keys", "business_advertiser", "display_image", "admin_amount_kobo", "price_kobo", "duration_days", "title", "description", "image", "image_url", "target_url", "placement", "status", "click_count", "impression_count", "starts_at", "ends_at", "approved_at", "created_at", "reviewer_note", "advertising_policy_accepted", "advertising_policy_accepted_at", "has_successful_payment", "payment_status", "refund_status")
+        read_only_fields = ("id", "status", "price_kobo", "duration_days", "click_count", "impression_count", "approved_at", "business_advertiser", "created_at", "reviewer_note", "advertising_policy_accepted", "advertising_policy_accepted_at", "has_successful_payment", "payment_status", "refund_status")
 
     def get_fields(self):
         fields = super().get_fields()
@@ -31,6 +36,34 @@ class AdCampaignSerializer(serializers.ModelSerializer):
             fields["advertiser_email"].read_only = True
             fields["admin_amount_kobo"].read_only = True
         return fields
+
+    def _payments(self, obj):
+        return sorted(obj.payments.all(), key=lambda payment: (payment.created_at, payment.pk), reverse=True)
+
+    def _can_view_payment(self, obj):
+        request = self.context.get("request")
+        return bool(request and request.user.is_authenticated and (request.user.is_staff or obj.advertiser_id == request.user.pk))
+
+    def get_has_successful_payment(self, obj):
+        return any(payment.status == "success" for payment in self._payments(obj)) if self._can_view_payment(obj) else False
+
+    def get_payment_status(self, obj):
+        if not self._can_view_payment(obj):
+            return None
+        payments = self._payments(obj)
+        return payments[0].status if payments else None
+
+    def get_refund_status(self, obj):
+        if not self._can_view_payment(obj):
+            return ""
+        payments = self._payments(obj)
+        return next((payment.refund_status for payment in payments if payment.status == "success" and payment.refund_status), "")
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self._can_view_payment(instance):
+            data.pop("reviewer_note", None)
+        return data
 
     def get_image_url(self, obj):
         if not obj.image:
@@ -61,8 +94,18 @@ class AdCampaignSerializer(serializers.ModelSerializer):
         return image
 
     def validate_target_url(self, value):
-        if value and not settings.DEBUG and not value.lower().startswith("https://"):
-            raise serializers.ValidationError("Ad destination URLs must use HTTPS.")
+        if value:
+            parsed = urlsplit(value)
+            if not settings.DEBUG and parsed.scheme.lower() != "https":
+                raise serializers.ValidationError("Ad destination URLs must use HTTPS.")
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+            if hostname in ("localhost", "localhost.localdomain") or hostname.endswith((".local", ".internal", ".test")):
+                raise serializers.ValidationError("Use a public website as the destination for your advertisement.")
+            try:
+                if not ip_address(hostname).is_global:
+                    raise serializers.ValidationError("Private network addresses cannot be advertisement destinations.")
+            except ValueError:
+                pass
         return value
 
     def validate(self, attrs):

@@ -23,6 +23,8 @@ class AdCampaign(models.Model):
 
     advertiser = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="ad_campaigns", null=True, blank=True)
     business_advertiser = models.ForeignKey("ads.AdAdvertiser", on_delete=models.PROTECT, related_name="campaigns", null=True, blank=True)
+    waitlist_entry = models.ForeignKey("ads.AdWaitlistEntry", on_delete=models.SET_NULL, related_name="campaigns", null=True, blank=True)
+    management_token_hash = models.CharField(max_length=64, blank=True, db_index=True)
     ad_placement = models.ForeignKey("ads.AdPlacement", on_delete=models.PROTECT, related_name="campaigns", null=True, blank=True)
     ad_placements = models.ManyToManyField("ads.AdPlacement", related_name="multi_page_campaigns", blank=True)
     package = models.ForeignKey("administration.SubscriptionPlan", null=True, blank=True, on_delete=models.SET_NULL, related_name="ad_campaigns")
@@ -40,6 +42,9 @@ class AdCampaign(models.Model):
     starts_at = models.DateTimeField(null=True, blank=True)
     ends_at = models.DateTimeField(null=True, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)
+    reviewer_note = models.TextField(blank=True)
+    advertising_policy_accepted = models.BooleanField(default=False)
+    advertising_policy_accepted_at = models.DateTimeField(null=True, blank=True)
     click_count = models.PositiveBigIntegerField(default=0)
     impression_count = models.PositiveBigIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)

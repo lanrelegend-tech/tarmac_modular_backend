@@ -20,6 +20,7 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from .models import User, StudentVerification, AccountActionToken, ProfileChangeRequest, ProfileChangeMessage, CourseProgram, AnonymousMarketplaceIdentity
 from .serializers import RegisterSerializer, UserSerializer, StudentPublicProfileSerializer, StudentVerificationSerializer, ProfileUpdateSerializer, StudentProfileChangeRequestSerializer, EmailTokenSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer, CourseProgramSerializer, AnonymousMarketplaceIdentitySerializer
 from .permissions import IsVerifiedStudent, is_student_feature_eligible
+from apps.administration.permissions import IsAdminOrAbove
 from .services import consume_account_action_token, issue_account_action_token
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class CourseProgramViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ("list", "retrieve"):
             return [permissions.AllowAny()]
-        return [permissions.IsAdminUser()]
+        return [IsAdminOrAbove()]
 
 class RegisterView(generics.CreateAPIView):
     queryset=User.objects.all(); serializer_class=RegisterSerializer; permission_classes=[permissions.AllowAny]

@@ -60,7 +60,44 @@ def paystack_webhook(request):
         event = json.loads(raw_body)
     except (TypeError, ValueError):
         return Response({"detail": "Invalid JSON."}, status=status.HTTP_400_BAD_REQUEST)
-    if event.get("event") not in ("charge.success", "charge.failed"):
+    event_name = event.get("event")
+    if event_name and event_name.startswith("refund."):
+        data = event.get("data") or {}
+        transaction_reference = data.get("transaction_reference") or (data.get("transaction") or {}).get("reference")
+        if not transaction_reference:
+            return Response({"received": True})
+        status_map = {
+            "refund.pending": Payment.RefundStatus.PENDING,
+            "refund.processing": Payment.RefundStatus.PROCESSING,
+            "refund.needs-attention": Payment.RefundStatus.NEEDS_ATTENTION,
+            "refund.failed": Payment.RefundStatus.FAILED,
+            "refund.processed": Payment.RefundStatus.PROCESSED,
+        }
+        with transaction.atomic():
+            payment = Payment.objects.select_for_update().select_related("advertisement__business_advertiser", "user").filter(reference=transaction_reference, advertisement__isnull=False).first()
+            if not payment:
+                return Response({"received": True})
+            payment.refund_status = status_map[event_name]
+            payment.refund_response = {"status": data.get("status"), "refund_reference": data.get("refund_reference"), "amount": data.get("amount"), "currency": data.get("currency"), "event": event_name}
+            if data.get("refund_reference"):
+                payment.refund_reference = str(data["refund_reference"])[:100]
+            payment.save(update_fields=("refund_status", "refund_reference", "refund_response"))
+            if event_name in ("refund.needs-attention", "refund.failed", "refund.processed"):
+                message = {
+                    "refund.needs-attention": "Paystack needs more information to complete your advertising refund. Please contact Tarmac Support.",
+                    "refund.failed": "Paystack could not complete your advertising refund. Contact Tarmac Support so we can help resolve it.",
+                    "refund.processed": "Paystack processed your advertising refund. Your bank may take several business days to show the funds.",
+                }[event_name]
+                campaign = payment.advertisement
+                if campaign and campaign.business_advertiser_id:
+                    from apps.notifications.email import send_tarmac_email
+                    recipient = campaign.business_advertiser.email
+                    name = campaign.business_advertiser.contact_name
+                    transaction.on_commit(lambda: send_tarmac_email(subject="Tarmac advertising refund update", text_body=message, recipient=recipient, recipient_name=name))
+                elif payment.user_id:
+                    notify_user(payment.user, "Tarmac advertising refund update", message, {"kind": "ad_refund_update", "campaign_id": payment.advertisement_id, "refund_status": payment.refund_status}, f"ad-refund:{payment.pk}:{payment.refund_status}")
+        return Response({"received": True})
+    if event_name not in ("charge.success", "charge.failed"):
         return Response({"received": True})
     data = event.get("data") or {}
     reference = data.get("reference")
@@ -99,37 +136,28 @@ def paystack_webhook(request):
                         {"kind": "listing_review", "notification_category": "payments", "product_id": payment.product_id, "title": payment.product.title}, f"listing-review:{payment.product_id}")
         elif payment.advertisement_id and payment.advertisement.status == AdCampaign.Status.PENDING_PAYMENT:
             campaign = AdCampaign.objects.select_for_update().select_related("business_advertiser", "ad_placement").prefetch_related("ad_placements").get(pk=payment.advertisement_id)
+            from apps.ads.models import AdPlacement, AdSlotHold
+            from apps.ads.services import get_slot_availability
+            placements = list(campaign.ad_placements.order_by("pk")) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
+            locked_placements = list(AdPlacement.objects.select_for_update().filter(pk__in=[slot.pk for slot in placements]).order_by("pk")) if placements else []
+            holds = {hold.placement_id: hold for hold in AdSlotHold.objects.select_for_update().filter(campaign=campaign, expires_at__gt=timezone.now())}
+            missing = [slot for slot in locked_placements if slot.pk not in holds]
+            full_slots = [slot for slot in missing if get_slot_availability(slot, campaign.starts_at, campaign.ends_at, exclude_campaign_id=campaign.pk)["remaining"] <= 0]
+            if not full_slots and locked_placements:
+                for slot in locked_placements:
+                    AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": campaign.starts_at, "ends_at": campaign.ends_at, "expires_at": campaign.ends_at, "is_confirmed": True})
+            campaign.status = AdCampaign.Status.PENDING_REVIEW
+            campaign.save(update_fields=("status", "updated_at"))
+            conflict_names = ", ".join(slot.position for slot in full_slots)
             if campaign.business_advertiser_id:
-                from apps.ads.models import AdSlotHold
-                from apps.ads.services import get_slot_availability
-                holds = {hold.placement_id: hold for hold in AdSlotHold.objects.select_for_update().filter(campaign=campaign, expires_at__gt=timezone.now())}
-                placements = list(campaign.ad_placements.order_by("pk")) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
-                missing = [slot for slot in placements if slot.pk not in holds]
-                full_slots = [slot for slot in missing if get_slot_availability(slot, campaign.starts_at, campaign.ends_at, exclude_campaign_id=campaign.pk)["remaining"] <= 0]
-                if not full_slots and placements:
-                    for slot in placements:
-                        hold, _ = AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": campaign.starts_at, "ends_at": campaign.ends_at, "expires_at": timezone.now(), "is_confirmed": True})
-                    campaign.status = AdCampaign.Status.SCHEDULED if campaign.starts_at > timezone.now() else AdCampaign.Status.ACTIVE
-                    campaign.save(update_fields=("status", "updated_at"))
-                    message = f"Your advertisement '{campaign.title}' has been paid for and scheduled."
-                    action = "ad_campaign_payment_confirmed"
-                else:
-                    campaign.status = AdCampaign.Status.PENDING_REVIEW
-                    campaign.save(update_fields=("status", "updated_at"))
-                    conflict_names = ", ".join(slot.position for slot in full_slots)
-                    message = f"We received payment for '{campaign.title}', but the requested slots ({conflict_names or 'one or more selected placements'}) need an administrator to review. Tarmac Support will contact you shortly."
-                    action = "ad_campaign_paid_slot_conflict"
-                from apps.administration.models import AdminLog
-                AdminLog.objects.create(actor=None, action=action, target_type="AdCampaign", target_id=str(campaign.pk), metadata={"payment_reference": payment.reference})
+                message = f"Payment for your Tarmac advertisement '{campaign.title}' is confirmed. It is now awaiting school review." if not full_slots else f"Payment for '{campaign.title}' is confirmed, but the requested slots ({conflict_names}) need manual availability review. Tarmac will contact you shortly."
                 from apps.notifications.email import send_tarmac_email
-                transaction.on_commit(lambda: send_tarmac_email(subject="Tarmac advertisement payment update", text_body=message, recipient=campaign.business_advertiser.email, recipient_name=campaign.business_advertiser.contact_name, action_url=f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').split(',')[0].rstrip('/')}/advertise", action_label="Visit Tarmac"))
-            else:
-                campaign = payment.advertisement
-                campaign.status = AdCampaign.Status.PENDING_REVIEW
-                campaign.save(update_fields=("status", "updated_at"))
-                if payment.user_id:
-                    notify_user(payment.user, "Ad payment received", f"Your ad '{campaign.title}' is awaiting school review.",
-                                {"kind": "ad_review", "notification_category": "payments", "title": campaign.title}, f"ad-review:{campaign.pk}")
+                transaction.on_commit(lambda: send_tarmac_email(subject="Tarmac advertisement payment confirmed", text_body=f"{message}\n\nUse the private campaign tracking link in your original Tarmac submission email to check the review status.", recipient=campaign.business_advertiser.email, recipient_name=campaign.business_advertiser.contact_name))
+            elif payment.user_id:
+                notify_user(payment.user, "Ad payment received", f"Your ad '{campaign.title}' is awaiting school review." if not full_slots else f"Your ad '{campaign.title}' is paid, but Tarmac must review the requested slot availability.",
+                            {"kind": "ad_review", "notification_category": "payments", "title": campaign.title}, f"ad-review:{campaign.pk}")
+            from apps.administration.models import AdminLog
+            AdminLog.objects.create(actor=None, action="ad_campaign_paid_slot_conflict" if full_slots else "ad_campaign_payment_confirmed", target_type="AdCampaign", target_id=str(campaign.pk), metadata={"payment_reference": payment.reference, "awaiting_review": True, "slot_conflicts": conflict_names})
         elif payment.subscription_plan_id:
             subscription, created = StudentSubscription.objects.get_or_create(payment_reference=payment.reference, defaults={"user": payment.user, "plan": payment.subscription_plan, "amount_kobo": payment.amount_kobo, "ends_at": timezone.now() + timedelta(days=payment.subscription_plan.duration_days)})
             if created:

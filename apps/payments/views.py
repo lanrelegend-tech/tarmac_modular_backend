@@ -2,6 +2,7 @@ import os
 import hashlib
 import secrets
 import requests
+from urllib.parse import urlencode
 from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
@@ -101,20 +102,27 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             campaign_id = int(request.data.get("campaign"))
         except (TypeError, ValueError):
             raise ValidationError({"campaign": "Provide a valid campaign ID."})
-        advertiser = AdAdvertiser.objects.filter(management_token_hash=hashlib.sha256(token.encode()).hexdigest()).first() if token else None
-        if not advertiser:
-            raise PermissionDenied("This private campaign link is invalid or expired.")
-        campaign = AdCampaign.objects.select_for_update().select_related("package", "ad_placement").filter(pk=campaign_id, business_advertiser=advertiser).first()
-        if not campaign or campaign.status != AdCampaign.Status.PENDING_PAYMENT or not campaign.approved_at:
-            raise ValidationError({"campaign": "Only approved campaigns awaiting payment can be paid."})
+        token_hash = hashlib.sha256(token.encode()).hexdigest() if token else ""
+        campaign = AdCampaign.objects.select_for_update().select_related("business_advertiser", "package", "ad_placement").filter(pk=campaign_id, business_advertiser__isnull=False, management_token_hash=token_hash).first()
+        if campaign is None:
+            advertiser = AdAdvertiser.objects.filter(management_token_hash=token_hash).first() if token_hash else None
+            if not advertiser:
+                raise PermissionDenied("This private campaign link is invalid or expired.")
+            campaign = AdCampaign.objects.select_for_update().select_related("business_advertiser", "package", "ad_placement").filter(pk=campaign_id, business_advertiser=advertiser).first()
+        if not campaign:
+            raise PermissionDenied("This private campaign link does not grant access to this campaign.")
+        if campaign.status != AdCampaign.Status.PENDING_PAYMENT:
+            raise ValidationError({"campaign": "This campaign is not awaiting payment."})
         platform = PlatformSettings.get_solo()
         if not platform.ads_enabled:
             raise FeatureUnavailable("Advertising is currently disabled.")
         if not platform.ad_fee_enabled or not platform.paystack_enabled:
             campaign.price_kobo = 0
-            campaign.status = AdCampaign.Status.SCHEDULED if campaign.starts_at and campaign.starts_at > timezone.now() else AdCampaign.Status.ACTIVE
+            campaign.status = AdCampaign.Status.PENDING_REVIEW
             campaign.save(update_fields=("price_kobo", "status", "updated_at"))
-            AdSlotHold.objects.filter(campaign=campaign).delete()
+            placements = list(campaign.ad_placements.order_by("pk")) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
+            for slot in placements:
+                AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": campaign.starts_at, "ends_at": campaign.ends_at, "expires_at": campaign.ends_at, "is_confirmed": True})
             return Response({"free": True, "status": campaign.status})
         placements = list(campaign.ad_placements.order_by("pk")) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
         if not placements:
@@ -137,7 +145,8 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             raise APIException("Paystack payments are not configured. Contact Tarmac Support.")
         payment = Payment.objects.create(user=None, payer_email=advertiser.email, advertisement=campaign, amount_kobo=campaign.price_kobo)
         payload = {"email": advertiser.email, "amount": payment.amount_kobo, "currency": payment.currency, "reference": payment.reference, "metadata": {"advertisement_id": campaign.pk, "external_advertiser": True}}
-        callback_url = os.getenv("PAYSTACK_CALLBACK_URL", "")
+        frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").split(",")[0].rstrip("/")
+        callback_url = f"{frontend_origin}/advertise/manage?{urlencode({'token': token})}"
         if callback_url:
             payload["callback_url"] = callback_url
         try:
@@ -168,10 +177,14 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         platform = PlatformSettings.get_solo()
         if not platform.ads_enabled:
             raise FeatureUnavailable("Advertising is currently disabled.")
-        if not platform.ad_fee_enabled:
-            raise ValidationError({"advertisement": "Ad fees are disabled; submit the campaign for free."})
-        if not platform.paystack_enabled:
-            raise FeatureUnavailable("Paystack payments are currently disabled.")
+        if not platform.ad_fee_enabled or not platform.paystack_enabled:
+            ad.price_kobo = 0
+            ad.status = AdCampaign.Status.PENDING_REVIEW
+            ad.save(update_fields=("price_kobo", "status", "updated_at"))
+            placements = list(ad.ad_placements.order_by("pk")) or list(AdPlacement.objects.filter(pk=ad.ad_placement_id))
+            for slot in placements:
+                AdSlotHold.objects.update_or_create(campaign=ad, placement=slot, defaults={"starts_at": ad.starts_at, "ends_at": ad.ends_at, "expires_at": ad.ends_at, "is_confirmed": True})
+            return Response({"free": True, "status": ad.status})
         secret = os.getenv("PAYSTACK_SECRET_KEY")
         if not secret:
             raise APIException("Paystack payments are not configured.")
@@ -181,6 +194,18 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         amount_kobo = ad.price_kobo or (ad.package.price_kobo if ad.package_id else platform.ad_fee_kobo)
         if not platform.ad_fee_enabled or amount_kobo == 0:
             raise ValidationError({"advertisement": "This campaign does not require a payment."})
+        placements = list(ad.ad_placements.order_by("pk")) or list(AdPlacement.objects.select_for_update().filter(pk=ad.ad_placement_id))
+        if not placements:
+            raise ValidationError({"advertisement": "This campaign has no assigned placement."})
+        now = timezone.now()
+        holds = {hold.placement_id: hold for hold in AdSlotHold.objects.select_for_update().filter(campaign=ad)}
+        if any(slot.pk not in holds or holds[slot.pk].expires_at <= now for slot in placements):
+            full = [slot for slot in placements if get_slot_availability(slot, ad.starts_at, ad.ends_at, exclude_campaign_id=ad.pk)["remaining"] <= 0]
+            if full:
+                AdSlotHold.objects.filter(campaign=ad, is_confirmed=False).delete()
+                raise ValidationError({"availability": f"These dates filled while you were preparing payment: {', '.join(slot.position for slot in full)}. Join the waitlist."})
+        for slot in placements:
+            AdSlotHold.objects.update_or_create(campaign=ad, placement=slot, defaults={"starts_at": ad.starts_at, "ends_at": ad.ends_at, "expires_at": now + timedelta(minutes=30), "is_confirmed": False})
         payment = Payment.objects.create(user=request.user, advertisement=ad, amount_kobo=amount_kobo)
         payload = {"email": request.user.email, "amount": payment.amount_kobo, "currency": payment.currency, "reference": payment.reference,
                    "metadata": {"advertisement_id": ad.pk, "user_id": request.user.pk}}

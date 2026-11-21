@@ -15,7 +15,7 @@ class PrivateStudentIDStorage(FileSystemStorage):
         kwargs.setdefault("location", settings.PRIVATE_MEDIA_ROOT)
         super().__init__(*args, **kwargs)
 class User(AbstractUser):
-    class Role(models.TextChoices): STUDENT="student", "Student"; ADMIN="admin", "Admin"; SUPER_ADMIN="super_admin", "Super admin"
+    class Role(models.TextChoices): STUDENT="student", "Student"; MODERATOR="moderator", "Moderator"; ADMIN="admin", "Admin"; SUPER_ADMIN="super_admin", "Super admin"
     email = models.EmailField(unique=True)
     matric_number = models.CharField(max_length=40, unique=True, null=True, blank=True)
     public_id = models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)

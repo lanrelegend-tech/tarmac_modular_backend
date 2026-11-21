@@ -229,10 +229,18 @@ class AdminReviewReportSerializer(serializers.ModelSerializer):
 class AdminAccountSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source="course.name", read_only=True, allow_null=True)
     student_status = serializers.CharField(read_only=True)
+    profile_picture_url = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "student_status_override", "campus", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
+        fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "student_status_override", "campus", "profile_picture_url", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
         read_only_fields = ("id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course_name", "student_status", "student_status_override", "campus", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
+
+    def get_profile_picture_url(self, obj):
+        if not obj.profile_picture:
+            return None
+        request = self.context.get("request")
+        path = f"/api/accounts/profile-image/{obj.public_id}/"
+        return request.build_absolute_uri(path) if request else path
 
     def validate(self, attrs):
         course = attrs.get("course", getattr(self.instance, "course", None))
@@ -446,7 +454,7 @@ class AdminPaymentSerializer(serializers.ModelSerializer):
     class Meta:
         from apps.payments.models import Payment
         model = Payment
-        fields = ("id", "user", "user_email", "product", "product_title", "advertisement", "advertisement_title", "subscription_plan", "subscription_plan_name", "reference", "amount_kobo", "currency", "status", "created_at", "paid_at")
+        fields = ("id", "user", "user_email", "product", "product_title", "advertisement", "advertisement_title", "subscription_plan", "subscription_plan_name", "reference", "amount_kobo", "currency", "status", "refund_status", "refund_reference", "refund_response", "refund_requested_at", "created_at", "paid_at")
 
 class AdminLostFoundSerializer(serializers.ModelSerializer):
     reporter_id = serializers.IntegerField(read_only=True)

@@ -8,7 +8,7 @@ from django.utils import timezone
 from rest_framework import viewsets, permissions
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.models import PlatformSettings, AdminLog
-from apps.administration.permissions import PlatformFeatureEnabled
+from apps.administration.permissions import IsAdminOrAbove, PlatformFeatureEnabled
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from .models import Category, Product, ProductImage, Favourite
@@ -21,7 +21,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
     serializer_class=CategorySerializer
     def get_permissions(self):
         if self.request.user and self.request.user.is_staff:
-            return [permissions.IsAdminUser()]
+            return [IsAdminOrAbove()]
         return [IsVerifiedStudent(), PlatformFeatureEnabled()]
 
     def get_queryset(self):

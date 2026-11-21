@@ -20,7 +20,7 @@ from rest_framework.response import Response
 
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.models import PlatformSettings
-from apps.administration.permissions import PlatformFeatureEnabled
+from apps.administration.permissions import IsAdminOrAbove, PlatformFeatureEnabled
 from .models import AdAdvertiser, AdCampaign, AdImpression, AdPlacement, AdSlotHold, AdWaitlistEntry
 from .serializers import AdCampaignSerializer, AdPlacementSerializer, AdWaitlistEntrySerializer
 from .services import get_slot_availability, local_date_window
@@ -70,7 +70,7 @@ class AdPlacementViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ("list", "retrieve", "availability", "waitlist"):
             return [permissions.AllowAny(), PlatformFeatureEnabled()]
-        return [permissions.IsAdminUser()]
+        return [IsAdminOrAbove()]
 
     @action(detail=True, methods=["get"])
     def availability(self, request, pk=None):
@@ -106,12 +106,13 @@ class AdPlacementViewSet(viewsets.ModelViewSet):
         if entry.status == AdWaitlistEntry.Status.CANCELLED:
             entry.status = AdWaitlistEntry.Status.WAITING
             entry.save(update_fields=("status", "updated_at"))
-        return Response({"id": entry.pk, "status": entry.status, "created": created, "placement": placement.position, "start_date": start_date, "end_date": end_date}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        earlier = AdWaitlistEntry.objects.filter(placement=placement, starts_at=starts_at, ends_at=ends_at, status__in=(AdWaitlistEntry.Status.WAITING, AdWaitlistEntry.Status.OFFERED), created_at__lt=entry.created_at).count()
+        return Response({"id": entry.pk, "status": entry.status, "queue_position": earlier + 1 if entry.status == AdWaitlistEntry.Status.WAITING else None, "created": created, "placement": placement.position, "start_date": start_date, "end_date": end_date}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class AdminAdWaitlistViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AdWaitlistEntrySerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdminOrAbove]
 
     def get_queryset(self):
         queryset = AdWaitlistEntry.objects.select_related("advertiser", "placement").all()
@@ -125,6 +126,9 @@ class AdminAdWaitlistViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"placement": "This placement is disabled and cannot accept bookings."})
         if entry.status not in (AdWaitlistEntry.Status.WAITING, AdWaitlistEntry.Status.OFFERED):
             raise ValidationError({"status": "Only waiting advertisers can be contacted."})
+        another_offer = AdWaitlistEntry.objects.filter(placement=entry.placement, status=AdWaitlistEntry.Status.OFFERED, offer_expires_at__gt=timezone.now(), starts_at__lt=entry.ends_at, ends_at__gt=entry.starts_at).exclude(pk=entry.pk).exists()
+        if another_offer:
+            raise ValidationError({"status": "Another advertiser already has an active 24-hour offer for overlapping dates."})
         if get_slot_availability(entry.placement, entry.starts_at, entry.ends_at)["remaining"] <= 0:
             raise ValidationError({"availability": "This placement is still fully booked for those dates."})
         _send_waitlist_offer(entry, request.user)
@@ -134,7 +138,7 @@ class AdminAdWaitlistViewSet(viewsets.ReadOnlyModelViewSet):
 class AdminAdPlacementViewSet(viewsets.ModelViewSet):
     serializer_class = AdPlacementSerializer
     queryset = AdPlacement.objects.all()
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdminOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
 
     @action(detail=True, methods=["get"])
@@ -178,6 +182,24 @@ def _send_waitlist_offer(entry, actor=None):
 def _offer_next_waitlisted(placement, starts_at, ends_at):
     if not placement.is_active:
         return
+    now = timezone.now()
+    expired_campaign_ids = list(AdSlotHold.objects.filter(
+        placement=placement,
+        is_confirmed=False,
+        expires_at__lte=now,
+        campaign__status=AdCampaign.Status.PENDING_PAYMENT,
+    ).values_list("campaign_id", flat=True).distinct())
+    if expired_campaign_ids:
+        unpaid_ids = list(AdCampaign.objects.filter(pk__in=expired_campaign_ids).exclude(payments__status="success").values_list("pk", flat=True).distinct())
+        AdSlotHold.objects.filter(campaign_id__in=unpaid_ids).delete()
+        AdWaitlistEntry.objects.filter(campaigns__pk__in=unpaid_ids).update(status=AdWaitlistEntry.Status.WAITING, offer_token_hash="", offer_expires_at=None, created_at=now)
+    AdWaitlistEntry.objects.filter(
+        placement=placement,
+        status=AdWaitlistEntry.Status.OFFERED,
+        offer_expires_at__lte=now,
+        starts_at__lt=ends_at,
+        ends_at__gt=starts_at,
+    ).update(status=AdWaitlistEntry.Status.WAITING, offer_token_hash="", offer_expires_at=None, created_at=now)
     active_offer = AdWaitlistEntry.objects.filter(
         placement=placement,
         status=AdWaitlistEntry.Status.OFFERED,
@@ -219,16 +241,16 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         if getattr(self, "action", None) in ("public_submit", "public_manage", "public_cancel"):
             return [permissions.AllowAny(), PlatformFeatureEnabled()]
         if getattr(self, "action", None) in ("approve", "reject", "pause", "activate"):
-            return [permissions.IsAdminUser()]
+            return [IsAdminOrAbove()]
         if self.request.user and self.request.user.is_staff:
-            return [permissions.IsAdminUser()]
+            return [IsAdminOrAbove()]
         return [IsVerifiedStudent(), PlatformFeatureEnabled()]
 
     def get_queryset(self):
         if self.request.user.is_staff:
-            return AdCampaign.objects.select_related("advertiser", "business_advertiser", "ad_placement", "package").all()
+            return AdCampaign.objects.select_related("advertiser", "business_advertiser", "ad_placement", "package").prefetch_related("payments", "ad_placements").all()
         now = timezone.now()
-        active = AdCampaign.objects.filter(status=AdCampaign.Status.ACTIVE).filter(
+        active = AdCampaign.objects.filter(status=AdCampaign.Status.ACTIVE).prefetch_related("payments", "ad_placements").filter(
             models_q_start(now), models_q_end(now)
         )
         surface = self.request.query_params.get("surface")
@@ -258,7 +280,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
                 active = active.filter(Q(IContains(page_text, Value(f'"{page_value}"'))))
             return active
         if self.request.user.is_authenticated:
-            return active | AdCampaign.objects.filter(advertiser=self.request.user)
+            return active | AdCampaign.objects.filter(advertiser=self.request.user).prefetch_related("payments", "ad_placements")
         return active
 
     @action(detail=False, methods=["post"], url_path="public-submit")
@@ -269,6 +291,9 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Advertising submissions are currently closed.")
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        accepted_policy = str(request.data.get("advertising_policy_accepted", "")).lower() in ("true", "1", "yes")
+        if not accepted_policy:
+            raise ValidationError({"advertising_policy_accepted": "Confirm that your advert follows Tarmac's advertising rules before submitting."})
         if not serializer.validated_data.get("image"):
             raise ValidationError({"image": "Upload an advertisement image before submitting."})
         placements = serializer.validated_data.get("ad_placements") or []
@@ -338,22 +363,30 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             advertiser.save(update_fields=("business_name", "contact_name", "phone", "location", "website", "updated_at"))
 
         token = secrets.token_urlsafe(32)
-        advertiser.management_token_hash = _token_hash(token)
-        advertiser.save(update_fields=("management_token_hash", "updated_at"))
+        if not advertiser.management_token_hash:
+            advertiser.management_token_hash = _token_hash(token)
+            advertiser.save(update_fields=("management_token_hash", "updated_at"))
+        needs_payment = platform.ad_fee_enabled and platform.paystack_enabled and plan.price_kobo > 0
         campaign = serializer.save(
             advertiser=None,
             business_advertiser=advertiser,
+            management_token_hash=_token_hash(token),
+            waitlist_entry=waitlist_entry,
             placement=placement.page,
             ad_placement=placement,
             ad_placements=placements,
             pages=sorted({item.page for item in placements}),
             business_name=business_name,
-            status=AdCampaign.Status.PENDING_REVIEW,
+            status=AdCampaign.Status.PENDING_PAYMENT if needs_payment else AdCampaign.Status.PENDING_REVIEW,
             starts_at=starts_at,
             ends_at=ends_at,
             duration_days=plan.duration_days,
             price_kobo=plan.price_kobo if platform.ad_fee_enabled and platform.paystack_enabled else 0,
+            advertising_policy_accepted=True,
+            advertising_policy_accepted_at=timezone.now(),
         )
+        for slot in placements:
+            AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": starts_at, "ends_at": ends_at, "expires_at": timezone.now() + timedelta(minutes=30) if needs_payment else ends_at, "is_confirmed": not needs_payment})
         if waitlist_entry:
             waitlist_entry.status = AdWaitlistEntry.Status.BOOKED
             waitlist_entry.offer_token_hash = ""
@@ -364,34 +397,47 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         from apps.notifications.email import send_tarmac_email
         db_transaction.on_commit(lambda: send_tarmac_email(
             subject="Tarmac received your advertising request",
-            text_body=f"We received your campaign request for {placement.position}. It is pending review. We will email you when the review is complete. You can securely check its status here.",
+            text_body=(f"We received your campaign request for {placement.position}. Complete payment from your private campaign page. After Paystack confirms payment, Tarmac will review the ad before it can go live." if needs_payment else f"We received your campaign request for {placement.position}. No payment is due. Tarmac will review the ad before it can go live."),
             recipient=advertiser.email,
             recipient_name=advertiser.contact_name,
             action_url=manage_url,
-            action_label="View campaign status",
+            action_label="View campaign and payment status",
         ))
-        return Response({"id": campaign.pk, "status": campaign.status, "placement": placement.position, "start_date": start_date, "end_date": end_date, "detail": "Your campaign is awaiting Tarmac review. We sent a private campaign link to your email."}, status=status.HTTP_201_CREATED)
+        return Response({"id": campaign.pk, "status": campaign.status, "placement": placement.position, "start_date": start_date, "end_date": end_date, "management_url": manage_url, "detail": "We sent a private campaign link to your email. Complete payment before Tarmac reviews the ad." if needs_payment else "We sent a private campaign link to your email. Tarmac will review the ad before it can go live."}, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["get"], url_path="public-manage")
     def public_manage(self, request):
         token = str(request.query_params.get("token", "")).strip()
         if not token:
             raise ValidationError({"token": "A campaign access link is required."})
-        advertiser = get_object_or_404(AdAdvertiser, management_token_hash=_token_hash(token))
+        token_hash = _token_hash(token)
+        campaign_access = AdCampaign.objects.filter(management_token_hash=token_hash, business_advertiser__isnull=False).select_related("business_advertiser").first()
+        if campaign_access:
+            advertiser = campaign_access.business_advertiser
+            campaigns = AdCampaign.objects.filter(pk=campaign_access.pk)
+        else:
+            advertiser = get_object_or_404(AdAdvertiser, management_token_hash=token_hash)
+            campaigns = advertiser.campaigns.all()
         rows = []
-        for campaign in advertiser.campaigns.select_related("ad_placement", "package").prefetch_related("payments").order_by("-created_at"):
+        for campaign in campaigns.select_related("ad_placement", "package").prefetch_related("payments", "ad_placements").order_by("-created_at"):
             payment = campaign.payments.order_by("-created_at").first()
             rows.append({
                 "id": campaign.pk,
                 "business_name": campaign.business_name,
                 "title": campaign.title,
+                "target_url": campaign.target_url,
                 "status": campaign.status,
                 "placement": ", ".join(campaign.ad_placements.values_list("position", flat=True)) or (campaign.ad_placement.position if campaign.ad_placement_id else campaign.placement),
                 "placement_key": campaign.ad_placement.key if campaign.ad_placement_id else "",
                 "start_date": timezone.localtime(campaign.starts_at).date() if campaign.starts_at else None,
                 "end_date": (timezone.localtime(campaign.ends_at) - timedelta(seconds=1)).date() if campaign.ends_at else None,
                 "amount_kobo": campaign.price_kobo,
+                "impressions": campaign.impression_count,
+                "clicks": campaign.click_count,
                 "payment_status": payment.status if payment else None,
+                "refund_status": payment.refund_status if payment else "",
+                "reviewer_note": campaign.reviewer_note,
+                "paid": bool(payment and payment.status == "success"),
                 "authorization_url": (payment.provider_response.get("data", {}).get("authorization_url") if payment and payment.status == "initialized" else None),
             })
         return Response({"business_name": advertiser.business_name, "campaigns": rows})
@@ -401,10 +447,15 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
     def public_cancel(self, request):
         token = str(request.data.get("token", "")).strip()
         campaign_id = request.data.get("campaign")
-        advertiser = get_object_or_404(AdAdvertiser, management_token_hash=_token_hash(token))
-        campaign = get_object_or_404(AdCampaign.objects.select_for_update().select_related("ad_placement"), pk=campaign_id, business_advertiser=advertiser)
+        token_hash = _token_hash(token)
+        campaign = AdCampaign.objects.select_for_update().select_related("ad_placement", "business_advertiser").filter(pk=campaign_id, management_token_hash=token_hash).first()
+        if campaign is None:
+            advertiser = get_object_or_404(AdAdvertiser, management_token_hash=token_hash)
+            campaign = get_object_or_404(AdCampaign.objects.select_for_update().select_related("ad_placement"), pk=campaign_id, business_advertiser=advertiser)
         if campaign.status in (AdCampaign.Status.ENDED, AdCampaign.Status.CANCELLED, AdCampaign.Status.REJECTED):
             raise ValidationError({"status": "This campaign is already closed."})
+        if campaign.payments.filter(status="success").exists():
+            raise ValidationError({"status": "This campaign has been paid. Contact Tarmac Support to request cancellation and review any refund."})
         campaign.status = AdCampaign.Status.CANCELLED
         campaign.save(update_fields=("status", "updated_at"))
         AdSlotHold.objects.filter(campaign=campaign).delete()
@@ -414,6 +465,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
                 transaction.on_commit(lambda slot=placement: _offer_next_waitlisted(slot, campaign.starts_at, campaign.ends_at))
         return Response({"status": campaign.status})
 
+    @transaction.atomic
     def perform_create(self, serializer):
         platform = PlatformSettings.get_solo()
         if self.request.user.is_staff:
@@ -435,15 +487,31 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         package = serializer.validated_data.get("package")
         if package is None:
             raise ValidationError({"package": "Choose an active advertising package."})
+        now = timezone.now()
+        starts_at = serializer.validated_data.get("starts_at") or now
+        ends_at = serializer.validated_data.get("ends_at") or starts_at + timedelta(days=package.duration_days)
+        placements = serializer.validated_data.get("ad_placements") or []
+        if not placements:
+            placements = [serializer.validated_data.get("ad_placement")] if serializer.validated_data.get("ad_placement") else _default_placements_for_pages(serializer.validated_data.get("pages", []))
+        if not placements:
+            raise ValidationError({"ad_placements": "Choose at least one active advertising placement."})
+        placements = list(AdPlacement.objects.select_for_update().filter(pk__in=sorted(item.pk for item in placements), is_active=True).order_by("pk"))
+        if not placements:
+            raise ValidationError({"ad_placements": "The selected advertising placements are not available."})
+        full = [slot for slot in placements if get_slot_availability(slot, starts_at, ends_at)["remaining"] <= 0]
+        if full:
+            raise ValidationError({"availability": f"These placements are fully booked for the selected dates: {', '.join(slot.position for slot in full)}."})
         needs_payment = platform.ad_fee_enabled and platform.paystack_enabled and package.price_kobo > 0
         initial_status = AdCampaign.Status.PENDING_PAYMENT if needs_payment else AdCampaign.Status.PENDING_REVIEW
-        campaign = serializer.save(advertiser=self.request.user, status=initial_status, price_kobo=package.price_kobo, duration_days=package.duration_days)
+        campaign = serializer.save(advertiser=self.request.user, status=initial_status, starts_at=starts_at, ends_at=ends_at, price_kobo=package.price_kobo if needs_payment else 0, duration_days=package.duration_days)
         campaign_placements = list(campaign.ad_placements.all()) or _default_placements_for_pages(campaign.pages)
         if campaign_placements:
             campaign.ad_placements.set(campaign_placements)
             if not campaign.ad_placement_id:
                 campaign.ad_placement = campaign_placements[0]
                 campaign.save(update_fields=("ad_placement", "updated_at"))
+        for slot in campaign_placements:
+            AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": starts_at, "ends_at": ends_at, "expires_at": now + timedelta(minutes=30) if needs_payment else ends_at, "is_confirmed": not needs_payment})
 
     def perform_update(self, serializer):
         if not self.request.user.is_staff and serializer.instance.advertiser_id != self.request.user.id:
@@ -467,7 +535,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-    @action(detail=True, methods=("post",), permission_classes=(permissions.IsAdminUser,))
+    @action(detail=True, methods=("post",), permission_classes=(IsAdminOrAbove,))
     @transaction.atomic
     def approve(self, request, pk=None):
         campaign = get_object_or_404(AdCampaign.objects.select_for_update().select_related("business_advertiser", "ad_placement", "package", "advertiser"), pk=pk)
@@ -480,7 +548,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             campaign.save(update_fields=("price_kobo", "updated_at"))
         if campaign.status != AdCampaign.Status.PENDING_REVIEW:
             raise ValidationError({"status": "Only campaigns awaiting review can be approved."})
-        if payment_required and not campaign.business_advertiser_id and not paid:
+        if payment_required and not paid:
             raise ValidationError({"payment": "A successful payment is required before approval."})
         if campaign.advertiser_id and not is_student_feature_eligible(campaign.advertiser):
             raise ValidationError({"advertiser": "The campaign owner must have an active student account and verified email."})
@@ -507,9 +575,9 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
                 )
         else:
             campaign.status = AdCampaign.Status.SCHEDULED if campaign.starts_at > now else AdCampaign.Status.ACTIVE
-            if campaign.business_advertiser_id and paid:
+            if paid:
                 for placement in locked_placements:
-                    AdSlotHold.objects.update_or_create(campaign=campaign, placement=placement, defaults={"starts_at": booking_starts_at, "ends_at": booking_ends_at, "expires_at": now, "is_confirmed": True})
+                    AdSlotHold.objects.update_or_create(campaign=campaign, placement=placement, defaults={"starts_at": booking_starts_at, "ends_at": booking_ends_at, "expires_at": booking_ends_at, "is_confirmed": True})
         campaign.save(update_fields=("status", "approved_at", "starts_at", "ends_at", "updated_at"))
         if campaign.package_id and campaign.advertiser_id:
             successful_payment = Payment.objects.filter(advertisement=campaign, status=Payment.Status.SUCCESS).order_by("-paid_at").first()
@@ -521,8 +589,8 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             from apps.notifications.email import send_tarmac_email
             advertiser = campaign.business_advertiser
             token = secrets.token_urlsafe(32)
-            advertiser.management_token_hash = _token_hash(token)
-            advertiser.save(update_fields=("management_token_hash", "updated_at"))
+            campaign.management_token_hash = _token_hash(token)
+            campaign.save(update_fields=("management_token_hash", "updated_at"))
             manage_url = f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').split(',')[0].rstrip('/')}/advertise/manage?token={token}"
             action_url = manage_url
             body = f"Your campaign ‘{campaign.title}’ was approved. Choose Complete payment in your secure campaign dashboard. Your date range is {timezone.localtime(campaign.starts_at).date()} to {(timezone.localtime(campaign.ends_at) - timedelta(seconds=1)).date()}."
@@ -534,26 +602,61 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             notify_user(campaign.advertiser, "Ad campaign approved", f"Your campaign '{campaign.title}' is now {campaign.status}.", {"kind": "ad_approved"}, f"ad-approved:{campaign.pk}")
         return Response({"status": campaign.status})
 
-    @action(detail=True, methods=("post",), permission_classes=(permissions.IsAdminUser,))
+    @action(detail=True, methods=("post",), permission_classes=(IsAdminOrAbove,))
+    @transaction.atomic
     def reject(self, request, pk=None):
-        campaign = self.get_object()
+        campaign = AdCampaign.objects.select_for_update().select_related("business_advertiser", "advertiser").get(pk=pk)
         if campaign.status == AdCampaign.Status.ACTIVE:
             raise ValidationError({"status": "Pause an active campaign before rejecting it."})
+        if campaign.status in (AdCampaign.Status.REJECTED, AdCampaign.Status.CANCELLED, AdCampaign.Status.ENDED):
+            raise ValidationError({"status": "This campaign is already closed."})
+        reason = str(request.data.get("reason", "")).strip()
+        if len(reason) < 5:
+            raise ValidationError({"reason": "Give the advertiser a clear reason (at least 5 characters)."})
+        from apps.payments.models import Payment
+        successful_payments = list(Payment.objects.select_for_update().filter(advertisement=campaign, status=Payment.Status.SUCCESS).order_by("created_at"))
+        refund_requested = request.data.get("refund")
+        if successful_payments and not isinstance(refund_requested, bool):
+            raise ValidationError({"refund": "Choose whether to refund the successful campaign payment."})
+        refund_results = []
+        if successful_payments and refund_requested:
+            from apps.payments.refunds import request_paystack_refund
+            refund_results = [request_paystack_refund(payment, reason=reason, actor=request.user) for payment in successful_payments]
         campaign.status = AdCampaign.Status.REJECTED
-        campaign.save(update_fields=("status", "updated_at"))
+        campaign.reviewer_note = reason
+        campaign.save(update_fields=("status", "reviewer_note", "updated_at"))
         AdSlotHold.objects.filter(campaign=campaign).delete()
         placements = list(campaign.ad_placements.all()) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
         if campaign.starts_at and campaign.ends_at:
             for placement in placements:
                 transaction.on_commit(lambda slot=placement: _offer_next_waitlisted(slot, campaign.starts_at, campaign.ends_at))
+        refund_states = [item["status"] for item in refund_results]
+        if not successful_payments:
+            refund_message = " No payment had been completed, so no refund is due."
+        elif not refund_requested:
+            refund_message = " No refund was requested. Contact Tarmac Support if you have a payment question."
+        elif any(value in ("failed", "needs_attention") for value in refund_states):
+            refund_message = " We could not complete the Paystack refund request automatically. Tarmac Support will follow up with you."
+        elif refund_states and all(value == "processed" for value in refund_states):
+            refund_message = " Paystack has processed your refund. Your bank may take several business days to show the funds."
+        else:
+            refund_message = " Paystack accepted the refund request. Your bank may take several business days to return the funds."
         if campaign.business_advertiser_id:
             from apps.notifications.email import send_tarmac_email
-            transaction.on_commit(lambda: send_tarmac_email(subject="Update on your Tarmac advertisement", text_body=f"Your campaign ‘{campaign.title}’ was not approved. Contact Tarmac support if you need more information.", recipient=campaign.business_advertiser.email, recipient_name=campaign.business_advertiser.contact_name, action_url=f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').split(',')[0].rstrip('/')}/support", action_label="Contact support"))
+            token = secrets.token_urlsafe(32)
+            campaign.management_token_hash = _token_hash(token)
+            campaign.save(update_fields=("management_token_hash", "updated_at"))
+            message = f"Your campaign ‘{campaign.title}’ was not approved. Reason: {reason}.{refund_message} You can review the decision and payment status using your private campaign link."
+            manage_url = f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').split(',')[0].rstrip('/')}/advertise/manage?token={token}"
+            transaction.on_commit(lambda: send_tarmac_email(subject="Update on your Tarmac advertisement", text_body=message, recipient=campaign.business_advertiser.email, recipient_name=campaign.business_advertiser.contact_name, action_url=manage_url, action_label="Open campaign status"))
+        elif campaign.advertiser_id:
+            from apps.notifications.services import notify_user
+            notify_user(campaign.advertiser, "Your Tarmac advertisement was not approved", f"Campaign: {campaign.title}. Reason: {reason}.{refund_message}", {"kind": "ad_rejected", "campaign_id": campaign.pk, "refund_status": refund_results[0]["status"] if refund_results else ""}, f"ad-rejected:{campaign.pk}")
         from apps.administration.models import AdminLog
-        AdminLog.objects.create(actor=request.user, action="ad_campaign_rejected", target_type="AdCampaign", target_id=str(campaign.pk), metadata={})
-        return Response({"status": campaign.status})
+        AdminLog.objects.create(actor=request.user, action="ad_campaign_rejected", target_type="AdCampaign", target_id=str(campaign.pk), metadata={"reason": reason, "refund_requested": bool(refund_requested), "refund_results": refund_results})
+        return Response({"status": campaign.status, "reason": reason, "refund_results": refund_results})
 
-    @action(detail=True, methods=("post",), permission_classes=(permissions.IsAdminUser,))
+    @action(detail=True, methods=("post",), permission_classes=(IsAdminOrAbove,))
     def pause(self, request, pk=None):
         campaign = self.get_object()
         if campaign.status != AdCampaign.Status.ACTIVE:
@@ -564,7 +667,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         AdminLog.objects.create(actor=request.user, action="ad_campaign_paused", target_type="AdCampaign", target_id=str(campaign.pk), metadata={})
         return Response({"status": campaign.status})
 
-    @action(detail=True, methods=("post",), permission_classes=(permissions.IsAdminUser,))
+    @action(detail=True, methods=("post",), permission_classes=(IsAdminOrAbove,))
     def activate(self, request, pk=None):
         campaign = self.get_object()
         if campaign.status != AdCampaign.Status.PAUSED:

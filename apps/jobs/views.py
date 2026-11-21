@@ -19,7 +19,7 @@ from rest_framework.views import APIView
 from apps.accounts.models import User
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.models import AdminLog, PlatformSettings
-from apps.administration.permissions import PlatformFeatureEnabled
+from apps.administration.permissions import IsAdminOrAbove, IsModeratorOrAbove, PlatformFeatureEnabled
 from apps.messaging.models import BlockedUser, Conversation
 from apps.messaging.serializers import ConversationSerializer, create_participant_snapshot
 from apps.notifications.email import send_tarmac_email
@@ -57,10 +57,10 @@ class JobCategoryViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.request.user and self.request.user.is_staff:
-            return [permissions.IsAdminUser()]
+            return [IsAdminOrAbove()]
         if self.action == "list":
             return [AllowAny(), PlatformFeatureEnabled()]
-        return [permissions.IsAdminUser()]
+        return [IsAdminOrAbove()]
 
     def get_queryset(self):
         qs = JobCategory.objects.all()
@@ -85,7 +85,7 @@ class JobListingViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.request.user and self.request.user.is_staff:
-            return [permissions.IsAdminUser()]
+            return [IsAdminOrAbove()]
         return [IsVerifiedStudent(), PlatformFeatureEnabled()]
 
     def get_queryset(self):
@@ -447,7 +447,7 @@ class ExternalJobManageView(APIView):
 class AdminJobListingViewSet(viewsets.ModelViewSet):
     queryset = JobListing.objects.select_related("owner", "category", "reviewed_by").all()
     serializer_class = AdminJobListingSerializer
-    permission_classes = (permissions.IsAdminUser,)
+    permission_classes = (IsModeratorOrAbove,)
     http_method_names = ("get", "patch", "head", "options")
     search_fields = ("title", "business_name", "business_email", "owner__email")
     filterset_fields = ("source", "kind", "status")
@@ -525,7 +525,7 @@ class AdminJobListingViewSet(viewsets.ModelViewSet):
 class AdminJobReportViewSet(viewsets.ModelViewSet):
     queryset = JobReport.objects.select_related("listing", "reporter").all()
     serializer_class = AdminJobReportSerializer
-    permission_classes = (permissions.IsAdminUser,)
+    permission_classes = (IsModeratorOrAbove,)
     http_method_names = ("get", "patch", "head", "options")
     filterset_fields = ("status", "reason")
 

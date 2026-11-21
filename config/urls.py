@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.contrib.admin import AdminSite
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
@@ -15,6 +16,16 @@ from apps.accounts.authentication import (
 )
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from apps.administration.views import system_status, system_logo
+
+
+class TarmacAdminSite(AdminSite):
+    def has_permission(self, request):
+        user = request.user
+        return bool(user.is_active and user.is_staff and (user.is_superuser or user.role == "admin"))
+
+
+# Keep moderators out of Django's separate built-in admin interface.
+admin.site.__class__ = TarmacAdminSite
 
 def _set_auth_cookies(response, access, refresh=None):
     response.set_cookie(

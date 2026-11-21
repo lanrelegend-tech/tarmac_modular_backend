@@ -30,6 +30,7 @@ from apps.ads.models import AdCampaign
 from apps.messaging.models import Conversation, Message
 from apps.messaging.serializers import MessageSerializer
 from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
+from .permissions import IsAdminOrAbove, IsModeratorOrAbove
 from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminAdministratorSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
 from apps.notifications.services import notify_user, dispatch_notification
@@ -41,7 +42,7 @@ class UserReportViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.request.user and self.request.user.is_staff:
-            return [permissions.IsAdminUser()]
+            return [IsModeratorOrAbove()]
         return [IsVerifiedStudent()]
 
     def get_queryset(self):
@@ -92,9 +93,9 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
             return [IsVerifiedStudent()]
         if self.action in ("list", "retrieve"):
             if self.request.user and self.request.user.is_staff:
-                return [permissions.IsAdminUser()]
+                return [IsModeratorOrAbove()]
             return [IsVerifiedStudent()]
-        return [permissions.IsAdminUser()]
+        return [IsModeratorOrAbove()]
     @action(detail=False, methods=["get"])
     def saved(self, request):
         ids = AnnouncementBookmark.objects.filter(user=request.user, announcement__is_published=True).values_list("announcement_id", flat=True)
@@ -131,7 +132,7 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
         announcement.save(update_fields=("pinned",))
         AdminLog.objects.create(actor=request.user, action="announcement_pinned" if announcement.pinned else "announcement_unpinned", target_type="Announcement", target_id=str(announcement.pk), metadata={})
         return Response({"pinned": announcement.pinned})
-class AdminLogViewSet(viewsets.ReadOnlyModelViewSet): queryset=AdminLog.objects.all(); serializer_class=AdminLogSerializer; permission_classes=[permissions.IsAdminUser]
+class AdminLogViewSet(viewsets.ReadOnlyModelViewSet): queryset=AdminLog.objects.all(); serializer_class=AdminLogSerializer; permission_classes=[IsAdminOrAbove]
 
 @api_view(["GET"])
 @drf_permission_classes([permissions.IsAuthenticated])
@@ -145,7 +146,7 @@ def report_evidence_image(request, evidence_id):
 
 class AdminVerificationViewSet(viewsets.ModelViewSet):
     serializer_class = AdminVerificationSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
 
     def get_queryset(self):
@@ -214,7 +215,7 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
 class AdminReviewViewSet(viewsets.ModelViewSet):
     queryset = SellerReview.objects.select_related("seller", "reviewer", "order").all()
     serializer_class = AdminReviewSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "delete", "head", "options"]
     filterset_fields = ["status", "rating", "category"]
 
@@ -225,7 +226,7 @@ class AdminReviewViewSet(viewsets.ModelViewSet):
 class AdminReviewReportViewSet(viewsets.ModelViewSet):
     queryset = ReviewReport.objects.select_related("review", "review__seller", "review__reviewer", "reporter").all()
     serializer_class = AdminReviewReportSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
     filterset_fields = ["status", "reason"]
 
@@ -239,7 +240,7 @@ class AdminReviewReportViewSet(viewsets.ModelViewSet):
 class AdminAccountViewSet(viewsets.ModelViewSet):
     queryset = User.objects.select_related("course").all().order_by("-date_joined")
     serializer_class = AdminAccountSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdminOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
     search_fields = ["email", "username", "matric_number"]
 
@@ -332,7 +333,7 @@ class AdminAccountViewSet(viewsets.ModelViewSet):
 
 class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
     serializer_class = AdminProfileChangeRequestSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdminOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
     filterset_fields = ["status"]
 
@@ -409,7 +410,7 @@ class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
 
 class AdminConversationViewSet(viewsets.GenericViewSet):
     serializer_class = AdminConversationSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdminOrAbove]
     http_method_names = ["get", "patch", "post", "head", "options"]
     def get_queryset(self):
         latest_messages = Message.objects.select_related("sender", "conversation").prefetch_related("attachments", "conversation__participant_snapshots").order_by("-created_at")[:50]
@@ -467,7 +468,7 @@ class SubscriptionPlanViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = SubscriptionPlan.objects.all()
         return queryset if self.request.user.is_staff else queryset.filter(is_active=True)
-    def get_permissions(self): return [permissions.AllowAny()] if self.action in ("list", "retrieve") else [permissions.IsAdminUser()]
+    def get_permissions(self): return [permissions.AllowAny()] if self.action in ("list", "retrieve") else [IsAdminOrAbove()]
     def perform_create(self, serializer):
         plan = serializer.save(); AdminLog.objects.create(actor=self.request.user, action="subscription_plan_created", target_type="SubscriptionPlan", target_id=str(plan.pk), metadata={})
     def perform_update(self, serializer):
@@ -475,13 +476,13 @@ class SubscriptionPlanViewSet(viewsets.ModelViewSet):
 
 class StudentSubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = StudentSubscriptionSerializer
-    def get_permissions(self): return [permissions.IsAdminUser()] if self.request.user.is_staff else [IsVerifiedStudent()]
+    def get_permissions(self): return [IsAdminOrAbove()] if self.request.user.is_staff else [IsVerifiedStudent()]
     def get_queryset(self):
         queryset = StudentSubscription.objects.select_related("user", "plan")
         return queryset if self.request.user.is_staff else queryset.filter(user=self.request.user)
 
 @api_view(["GET"])
-@drf_permission_classes([permissions.IsAdminUser])
+@drf_permission_classes([IsAdminOrAbove])
 def dashboard(request):
     today = timezone.localdate()
     month_start = today.replace(day=1)
@@ -504,7 +505,7 @@ def dashboard(request):
     })
 
 @api_view(["GET"])
-@drf_permission_classes([permissions.IsAdminUser])
+@drf_permission_classes([IsAdminOrAbove])
 def analytics(request):
     try:
         days = int(request.query_params.get("days", 30))
@@ -524,7 +525,7 @@ def analytics(request):
     return Response({"days": days, "series": series, "totals": {"registrations": sum(row["registrations"] for row in series), "payments": sum(row["payments"] for row in series), "revenue_kobo": sum(row["revenue_kobo"] for row in series), "lost_found_reports": sum(row["lost_found_reports"] for row in series)}})
 
 @api_view(["POST"])
-@drf_permission_classes([permissions.IsAdminUser])
+@drf_permission_classes([IsAdminOrAbove])
 @transaction.atomic
 def send_admin_message(request):
     email = str(request.data.get("email", "")).strip().lower()
@@ -638,7 +639,7 @@ def system_logo(request):
 
 class SupportTicketViewSet(viewsets.ModelViewSet):
     serializer_class = SupportTicketSerializer
-    permission_classes = [permissions.IsAdminUser | IsVerifiedStudent]
+    permission_classes = [IsAdminOrAbove | IsVerifiedStudent]
     http_method_names = ["get", "post", "patch", "head", "options"]
 
     def get_queryset(self):
@@ -646,8 +647,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         return queryset if self.request.user.is_staff else queryset.filter(user=self.request.user)
 
     def get_permissions(self):
-        if self.action == "partial_update":
-            return [permissions.IsAdminUser()]
+        if self.request.user and self.request.user.is_staff:
+            return [IsAdminOrAbove()]
         return super().get_permissions()
 
     def perform_create(self, serializer):
@@ -731,7 +732,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
 @drf_permission_classes([permissions.IsAuthenticated])
 def support_attachment_file(request, attachment_id):
     attachment = get_object_or_404(SupportAttachment.objects.select_related("message__ticket"), pk=attachment_id)
-    if not request.user.is_staff and attachment.message.ticket.user_id != request.user.pk:
+    is_admin = IsAdminOrAbove().has_permission(request, None)
+    if not is_admin and attachment.message.ticket.user_id != request.user.pk:
         from rest_framework.exceptions import PermissionDenied
         raise PermissionDenied("You cannot view attachments for another student's support ticket.")
     return FileResponse(attachment.file.open("rb"), content_type=attachment.content_type)
@@ -746,6 +748,12 @@ class AdminAdministratorViewSet(viewsets.GenericViewSet):
     serializer_class = AdminAdministratorSerializer
     permission_classes = [IsSuperUser]
     http_method_names = ["get", "post", "head", "options"]
+
+    STAFF_ROLES = {
+        "moderator": User.Role.MODERATOR,
+        "admin": User.Role.ADMIN,
+        "super_admin": User.Role.SUPER_ADMIN,
+    }
 
     def get_queryset(self):
         return User.objects.filter(is_staff=True).order_by("-is_superuser", "email")
@@ -768,13 +776,42 @@ class AdminAdministratorViewSet(viewsets.GenericViewSet):
         if not account.email_verified:
             raise ValidationError({"email": "The account must verify its email before administrator access can be granted."})
 
+        role = request.data.get("role", User.Role.ADMIN)
+        if role not in self.STAFF_ROLES:
+            raise ValidationError({"role": "Choose moderator, admin, or super_admin."})
+
         account.is_staff = True
-        account.role = User.Role.ADMIN
-        account.save(update_fields=("is_staff", "role"))
-        AdminLog.objects.create(actor=request.user, action="administrator_access_granted", target_type="User", target_id=str(account.pk))
+        account.is_superuser = role == User.Role.SUPER_ADMIN
+        account.role = self.STAFF_ROLES[role]
+        account.save(update_fields=("is_staff", "is_superuser", "role"))
+        AdminLog.objects.create(actor=request.user, action="administrator_access_granted", target_type="User", target_id=str(account.pk), metadata={"role": role})
         event_key = f"administrator-access:{account.pk}:granted:{request.user.pk}:{timezone.now().timestamp()}"
-        transaction.on_commit(lambda: notify_user(account, "Tarmac administrator access granted", "A Tarmac superuser granted administrator access to your account. Contact Tarmac Support immediately if you did not expect this change.", {"kind": "account_enforcement", "notification_category": "account_security"}, event_key))
+        transaction.on_commit(lambda: notify_user(account, "Tarmac staff access granted", f"A Tarmac superuser granted {role.replace('_', ' ')} access to your account. Contact Tarmac Support immediately if you did not expect this change.", {"kind": "account_enforcement", "notification_category": "account_security", "staff_role": role}, event_key))
         return Response(self.get_serializer(account).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="role")
+    @transaction.atomic
+    def change_role(self, request, pk=None):
+        account = get_object_or_404(User.objects.select_for_update(), pk=pk)
+        role = request.data.get("role")
+        if role not in self.STAFF_ROLES:
+            raise ValidationError({"role": "Choose moderator, admin, or super_admin."})
+        if not account.is_staff or not account.is_active or account.is_suspended:
+            raise ValidationError({"role": "Grant staff access to an active account before changing its staff role."})
+        if account.pk == request.user.pk:
+            raise ValidationError({"role": "You cannot change your own staff role."})
+        if account.is_superuser and role != User.Role.SUPER_ADMIN and User.objects.filter(is_superuser=True, is_active=True).count() <= 1:
+            raise ValidationError({"role": "Tarmac must keep at least one active superadmin."})
+
+        account.role = self.STAFF_ROLES[role]
+        account.is_superuser = role == User.Role.SUPER_ADMIN
+        account.save(update_fields=("role", "is_superuser"))
+        for outstanding in OutstandingToken.objects.filter(user=account):
+            BlacklistedToken.objects.get_or_create(token=outstanding)
+        AdminLog.objects.create(actor=request.user, action="administrator_role_changed", target_type="User", target_id=str(account.pk), metadata={"role": role})
+        event_key = f"administrator-role:{account.pk}:{role}:{request.user.pk}:{timezone.now().timestamp()}"
+        transaction.on_commit(lambda: notify_user(account, "Tarmac staff role updated", f"A Tarmac superadmin changed your staff role to {role.replace('_', ' ')}. You may need to sign in again.", {"kind": "account_enforcement", "notification_category": "account_security", "staff_role": role}, event_key))
+        return Response(self.get_serializer(account).data)
 
     @action(detail=True, methods=["post"], url_path="revoke")
     @transaction.atomic
@@ -782,14 +819,15 @@ class AdminAdministratorViewSet(viewsets.GenericViewSet):
         account = get_object_or_404(User.objects.select_for_update(), pk=pk)
         if not account.is_staff:
             raise ValidationError({"detail": "This account no longer has administrator access."})
-        if account.is_superuser:
-            raise ValidationError({"detail": "Superuser access cannot be revoked from this screen."})
         if account.pk == request.user.pk:
             raise ValidationError({"detail": "You cannot revoke your own administrator access."})
+        if account.is_superuser and User.objects.filter(is_superuser=True, is_active=True).count() <= 1:
+            raise ValidationError({"detail": "Tarmac must keep at least one active superadmin."})
 
         account.is_staff = False
+        account.is_superuser = False
         account.role = User.Role.STUDENT
-        account.save(update_fields=("is_staff", "role"))
+        account.save(update_fields=("is_staff", "is_superuser", "role"))
         for outstanding in OutstandingToken.objects.filter(user=account):
             BlacklistedToken.objects.get_or_create(token=outstanding)
         AdminLog.objects.create(actor=request.user, action="administrator_access_revoked", target_type="User", target_id=str(account.pk))
@@ -811,13 +849,28 @@ class PlatformSettingsView(generics.RetrieveUpdateAPIView):
 
 class AdminPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AdminPaymentSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdminOrAbove]
     def get_queryset(self):
         return Payment.objects.select_related("user", "product", "advertisement", "subscription_plan").order_by("-created_at")
 
+    @action(detail=True, methods=("post",), url_path="retry-refund")
+    @transaction.atomic
+    def retry_refund(self, request, pk=None):
+        payment = Payment.objects.select_for_update().select_related("advertisement").get(pk=pk)
+        if not payment.advertisement_id or payment.status != Payment.Status.SUCCESS:
+            raise ValidationError({"payment": "Only successful advertisement payments can be refunded here."})
+        if payment.refund_status != Payment.RefundStatus.FAILED:
+            raise ValidationError({"refund_status": "Only a failed refund can be retried."})
+        reason = payment.advertisement.reviewer_note or "Tarmac advertisement campaign rejection."
+        from apps.payments.refunds import request_paystack_refund
+        result = request_paystack_refund(payment, reason=reason, actor=request.user)
+        AdminLog.objects.create(actor=request.user, action="ad_refund_retried", target_type="Payment", target_id=str(payment.pk), metadata={"refund_status": result["status"], "detail": result["detail"]})
+        payment.refresh_from_db()
+        return Response({"refund_status": payment.refund_status, "refund_reference": payment.refund_reference, "detail": result["detail"]})
+
 class AdminLostFoundViewSet(viewsets.ModelViewSet):
     serializer_class = AdminLostFoundSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
     def get_queryset(self):
         return LostFoundReport.objects.select_related("reporter", "category").order_by("-created_at")
@@ -835,7 +888,7 @@ class AdminLostFoundViewSet(viewsets.ModelViewSet):
 
 class AdminItemClaimViewSet(viewsets.ModelViewSet):
     serializer_class = AdminItemClaimSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
     def get_queryset(self): return ItemClaim.objects.select_related("report", "claimant", "reviewed_by").order_by("status", "created_at")
     @transaction.atomic
@@ -857,7 +910,7 @@ class AdminItemClaimViewSet(viewsets.ModelViewSet):
 
 class AdminItemMatchViewSet(viewsets.ModelViewSet):
     serializer_class = AdminItemMatchSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
     filterset_fields = ["is_reviewed", "is_dismissed"]
     def get_queryset(self): return ItemMatch.objects.select_related("lost_report__reporter", "found_report__reporter").order_by("-score", "-created_at")
@@ -873,7 +926,7 @@ class AdminItemMatchViewSet(viewsets.ModelViewSet):
 
 class AdminProductViewSet(viewsets.ModelViewSet):
     serializer_class = AdminProductSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
     def get_queryset(self):
         return Product.objects.select_related("seller", "category").prefetch_related("images").order_by("-created_at")

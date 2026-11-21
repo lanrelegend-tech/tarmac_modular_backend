@@ -29,11 +29,10 @@ def get_slot_availability(placement, starts_at, ends_at, exclude_campaign_id=Non
     now = timezone.now()
     holds = AdSlotHold.objects.filter(
         placement=placement,
-        is_confirmed=False,
         expires_at__gt=now,
         starts_at__lt=ends_at,
         ends_at__gt=starts_at,
-    )
+    ).filter(Q(is_confirmed=False) | Q(is_confirmed=True, campaign__status=AdCampaign.Status.PENDING_REVIEW))
     if exclude_campaign_id:
         holds = holds.exclude(campaign_id=exclude_campaign_id)
     occupied += holds.count()
