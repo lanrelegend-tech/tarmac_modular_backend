@@ -96,12 +96,12 @@ def paystack_webhook(request):
                     update_fields.extend(("is_featured", "featured_until"))
             payment.product.save(update_fields=update_fields)
             notify_user(payment.user, "Listing payment received", f"Your listing '{payment.product.title}' is " + ("awaiting school review." if platform.listing_approval_required else "now active."),
-                        {"kind": "listing_review", "product_id": payment.product_id, "title": payment.product.title}, f"listing-review:{payment.product_id}")
+                        {"kind": "listing_review", "notification_category": "payments", "product_id": payment.product_id, "title": payment.product.title}, f"listing-review:{payment.product_id}")
         elif payment.advertisement_id and payment.advertisement.status == AdCampaign.Status.PENDING_PAYMENT:
             payment.advertisement.status = AdCampaign.Status.PENDING_REVIEW
             payment.advertisement.save(update_fields=("status", "updated_at"))
             notify_user(payment.user, "Ad payment received", f"Your ad '{payment.advertisement.title}' is awaiting school review.",
-                        {"kind": "ad_review", "title": payment.advertisement.title}, f"ad-review:{payment.advertisement_id}")
+                        {"kind": "ad_review", "notification_category": "payments", "title": payment.advertisement.title}, f"ad-review:{payment.advertisement_id}")
         elif payment.subscription_plan_id:
             subscription, created = StudentSubscription.objects.get_or_create(payment_reference=payment.reference, defaults={"user": payment.user, "plan": payment.subscription_plan, "amount_kobo": payment.amount_kobo, "ends_at": timezone.now() + timedelta(days=payment.subscription_plan.duration_days)})
             if created:

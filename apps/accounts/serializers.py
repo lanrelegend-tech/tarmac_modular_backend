@@ -4,18 +4,35 @@ import json
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
-from .models import User, StudentVerification, AccountActionToken, ProfileChangeRequest, ProfileChangeMessage
+from .models import User, StudentVerification, AccountActionToken, ProfileChangeRequest, ProfileChangeMessage, CourseProgram, AnonymousMarketplaceIdentity
+
+class CourseProgramSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CourseProgram
+        fields = ("id", "name", "duration_years", "is_active")
+        read_only_fields = ("id",)
+
+    def validate_name(self, value):
+        return value.strip()
+
+    def validate_duration_years(self, value):
+        if not 1 <= value <= 10:
+            raise serializers.ValidationError("Course duration must be between 1 and 10 years.")
+        return value
+
 class UserSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
     can_access_student_features = serializers.SerializerMethodField()
+    course_name = serializers.CharField(source="course.name", read_only=True, allow_null=True)
+    student_status = serializers.CharField(read_only=True)
     class Meta:
         model = User
-        fields = ("id", "username", "first_name", "last_name", "email", "email_verified", "date_joined", "matric_number", "department", "faculty", "level", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled")
+        fields = ("id", "username", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
         read_only_fields = fields
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
             return None
-        return f"/api/accounts/profile-image/{obj.pk}/"
+        return f"/api/accounts/profile-image/{obj.public_id}/"
 
     def get_can_access_student_features(self, obj):
         from .permissions import is_student_feature_eligible
@@ -23,15 +40,65 @@ class UserSerializer(serializers.ModelSerializer):
 
 class StudentPublicProfileSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
+    course_name = serializers.CharField(source="course.name", read_only=True, allow_null=True)
+    student_status = serializers.CharField(read_only=True)
     class Meta:
         model = User
-        fields = ("id", "username", "first_name", "last_name", "department", "faculty", "level", "campus", "bio", "is_student_verified", "profile_picture_url")
+        fields = ("public_id", "username", "first_name", "last_name", "department", "faculty", "level", "course_name", "student_status", "entry_year", "is_student_verified", "last_seen_at", "profile_picture_url", "public_name_enabled", "public_department_enabled", "public_level_enabled")
+        read_only_fields = fields
     def get_profile_picture_url(self, obj):
-        return f"/api/accounts/profile-image/{obj.pk}/" if obj.profile_picture else None
+        return f"/api/accounts/profile-image/{obj.public_id}/" if obj.profile_picture and obj.public_profile_enabled and obj.public_profile_picture_enabled else None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data.pop("public_name_enabled", None)
+        data.pop("public_department_enabled", None)
+        data.pop("public_level_enabled", None)
+        if not instance.public_name_enabled:
+            data["first_name"] = ""
+            data["last_name"] = ""
+            data["username"] = "Student"
+        if not instance.public_department_enabled:
+            data["department"] = ""
+            data["faculty"] = ""
+        if not instance.public_level_enabled:
+            data["level"] = ""
+            data["course_name"] = None
+            data["entry_year"] = None
+        return data
+
+
+class AnonymousMarketplaceIdentitySerializer(serializers.ModelSerializer):
+    handle = serializers.CharField(required=False, max_length=32)
+    class Meta:
+        model = AnonymousMarketplaceIdentity
+        fields = ("public_id", "handle", "is_enabled", "created_at")
+        read_only_fields = ("public_id", "created_at")
+    def create(self, validated_data):
+        import secrets
+        user = self.context["request"].user
+        if hasattr(user, "anonymous_marketplace_identity"):
+            raise serializers.ValidationError("You already have an anonymous marketplace identity.")
+        requested_handle = validated_data.pop("handle", None)
+        if requested_handle:
+            return AnonymousMarketplaceIdentity.objects.create(user=user, handle=requested_handle, **validated_data)
+        for _ in range(5):
+            handle = f"User{secrets.randbelow(900000) + 100000}"
+            if not AnonymousMarketplaceIdentity.objects.filter(handle=handle).exists():
+                return AnonymousMarketplaceIdentity.objects.create(user=user, handle=handle, **validated_data)
+        raise serializers.ValidationError("Could not create a unique marketplace identity. Try again.")
+
+    def validate_handle(self, value):
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,31}", value):
+            raise serializers.ValidationError("Use 3 to 32 letters, numbers, or underscores, starting with a letter.")
+        return value
 class RegisterSerializer(serializers.ModelSerializer):
     password=serializers.CharField(write_only=True, min_length=8)
     matric_number=serializers.CharField(required=True, max_length=40)
-    class Meta: model=User; fields=("id","username","first_name","last_name","email","matric_number","password","department","faculty","level")
+    course=serializers.PrimaryKeyRelatedField(queryset=CourseProgram.objects.filter(is_active=True), required=True)
+    entry_year=serializers.IntegerField(required=True, min_value=2000)
+    class Meta: model=User; fields=("id","username","first_name","last_name","email","matric_number","password","department","faculty","level","course","entry_year")
     def validate_email(self, value):
         value = value.strip().lower()
         if User.objects.filter(email__iexact=value).exists():
@@ -52,6 +119,13 @@ class RegisterSerializer(serializers.ModelSerializer):
     def validate_password(self, value):
         validate_password(value)
         return value
+    def validate_entry_year(self, value):
+        from django.utils import timezone
+        if value > timezone.localdate().year:
+            raise serializers.ValidationError("Entry year cannot be in the future.")
+        if value < timezone.localdate().year - 12:
+            raise serializers.ValidationError("Check the entry year; it must be within the last 12 years.")
+        return value
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
         from apps.administration.models import PlatformSettings
@@ -66,7 +140,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 class ProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ("username", "first_name", "last_name", "department", "faculty", "level", "campus", "bio", "phone_number", "whatsapp_number", "profile_picture", "notification_email_enabled", "notification_whatsapp_enabled")
+        fields = ("username", "first_name", "last_name", "department", "faculty", "level", "campus", "bio", "phone_number", "whatsapp_number", "profile_picture", "notification_email_enabled", "notification_whatsapp_enabled", "public_name_enabled", "public_department_enabled", "public_level_enabled", "public_profile_enabled", "public_profile_picture_enabled")
 
     def validate_profile_picture(self, image):
         if image and image.size > 5 * 1024 * 1024:
@@ -86,7 +160,10 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"whatsapp_number": "Use international E.164 format, such as +2348012345678."})
         if whatsapp_enabled and not number:
             raise serializers.ValidationError({"whatsapp_number": "Add a WhatsApp number before enabling WhatsApp notifications."})
-        if attrs.get("notification_whatsapp_enabled") is True and not all((os.getenv("WHATSAPP_ACCESS_TOKEN"), os.getenv("WHATSAPP_PHONE_NUMBER_ID"), os.getenv("WHATSAPP_MATCH_TEMPLATE"))):
+        from apps.administration.models import PlatformSettings
+        whatsapp_sender = PlatformSettings.get_solo().whatsapp_phone_number_id or os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+        any_template = any(os.getenv(key) for key in ("WHATSAPP_MATCH_TEMPLATE", "WHATSAPP_SUPPORT_TEMPLATE", "WHATSAPP_OFFICIAL_TEMPLATE", "WHATSAPP_PROMOTION_TEMPLATE", "WHATSAPP_SECURITY_TEMPLATE", "WHATSAPP_ORDER_TEMPLATE", "WHATSAPP_LISTING_TEMPLATE", "WHATSAPP_AD_TEMPLATE"))
+        if attrs.get("notification_whatsapp_enabled") is True and not all((os.getenv("WHATSAPP_ACCESS_TOKEN"), whatsapp_sender, any_template)):
             raise serializers.ValidationError({"notification_whatsapp_enabled": "WhatsApp notifications are not configured by the school yet."})
         return attrs
 
@@ -100,25 +177,37 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 class StudentVerificationSerializer(serializers.ModelSerializer):
     student_id_image = serializers.ImageField(write_only=True, required=False, allow_null=True)
-    class Meta: model=StudentVerification; fields=("id","student_id_image","submitted_matric_number","status","created_at"); read_only_fields=("status","created_at")
+    profile_picture = serializers.ImageField(write_only=True, required=False, allow_null=True)
+    profile_photo_consent = serializers.BooleanField(write_only=True, required=False)
+    class Meta: model=StudentVerification; fields=("id","student_id_image","profile_picture","profile_photo_consent","submitted_matric_number","requested_affiliation","status","created_at"); read_only_fields=("status","created_at")
 
     def validate(self, attrs):
         user = self.context["request"].user
         from apps.administration.models import PlatformSettings
         platform = PlatformSettings.get_solo()
         if not platform.student_verification_enabled: raise serializers.ValidationError("Student verification is currently disabled by the school.")
-        if platform.require_student_id and not attrs.get("student_id_image") and self.instance is None: raise serializers.ValidationError({"student_id_image": "Upload your student ID card to continue."})
+        if platform.require_student_id and not attrs.get("student_id_image") and self.instance is None: raise serializers.ValidationError({"student_id_image": "Upload your student ID card or alumni proof to continue."})
+        if self.instance is None and not attrs.get("profile_picture") and not user.profile_picture:
+            raise serializers.ValidationError({"profile_picture": "Upload a clear photo of yourself for account security."})
+        if self.instance is None and not attrs.get("profile_photo_consent"):
+            raise serializers.ValidationError({"profile_photo_consent": "Confirm that you agree to Tarmac storing your profile photo for account security."})
         if self.instance is None and user.is_student_verified:
             raise serializers.ValidationError("Your student account is already verified.")
         if self.instance and self.instance.status != StudentVerification.Status.PENDING:
             raise serializers.ValidationError("A reviewed verification submission cannot be changed.")
+        if self.instance and "profile_picture" in attrs:
+            raise serializers.ValidationError({"profile_picture": "Use the profile change request to update your saved profile photo."})
         if self.instance is None and StudentVerification.objects.filter(user=user, status=StudentVerification.Status.PENDING).exists():
             raise serializers.ValidationError("You already have a pending verification submission.")
         return attrs
 
     def validate_student_id_image(self, image):
-        if image.size > 5 * 1024 * 1024:
+        if image and image.size > 5 * 1024 * 1024:
             raise serializers.ValidationError("Student ID images must be 5 MB or smaller.")
+        return image
+    def validate_profile_picture(self, image):
+        if image and image.size > 5 * 1024 * 1024:
+            raise serializers.ValidationError("Your profile photo must be 5 MB or smaller.")
         return image
     def validate_submitted_matric_number(self, value):
         value = value.strip().upper()

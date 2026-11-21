@@ -8,6 +8,18 @@ from uuid import uuid4
 from config.storage import PrivateCloudinaryImageStorage
 
 
+def default_notification_channels():
+    return {
+        "lost_found": {"email": True, "whatsapp": False},
+        "support": {"email": True, "whatsapp": False},
+        "official": {"email": True, "whatsapp": False},
+        "promotional": {"email": True, "whatsapp": False},
+        "account_security": {"email": True, "whatsapp": False},
+        "marketplace": {"email": True, "whatsapp": False},
+        "payments": {"email": True, "whatsapp": False},
+    }
+
+
 def report_evidence_upload_to(instance, filename):
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
     return f"report_evidence/{uuid4().hex}.{extension}"
@@ -23,6 +35,9 @@ class UserReport(models.Model):
     class Status(models.TextChoices): OPEN = "open", "Open"; INVESTIGATING = "investigating", "Investigating"; RESOLVED = "resolved", "Resolved"; DISMISSED = "dismissed", "Dismissed"
     reporter=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="filed_reports"); reported_user=models.ForeignKey(settings.AUTH_USER_MODEL,null=True,blank=True,on_delete=models.SET_NULL,related_name="reports_against")
     product=models.ForeignKey("products.Product",null=True,blank=True,on_delete=models.SET_NULL); lost_found_report=models.ForeignKey("lost_found.LostFoundReport",null=True,blank=True,on_delete=models.SET_NULL)
+    marketplace_identity=models.ForeignKey("accounts.AnonymousMarketplaceIdentity",null=True,blank=True,on_delete=models.SET_NULL,related_name="reports")
+    target_identity_type=models.CharField(max_length=12,blank=True); target_identity_public_id=models.CharField(max_length=36,blank=True); target_identity_name=models.CharField(max_length=150,blank=True)
+    conversation=models.ForeignKey("messaging.Conversation",null=True,blank=True,on_delete=models.SET_NULL,related_name="moderation_reports")
     reason=models.CharField(max_length=100); details=models.TextField(blank=True); is_resolved=models.BooleanField(default=False); status=models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN); reviewer_note=models.TextField(blank=True); assigned_to=models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="assigned_reports"); created_at=models.DateTimeField(auto_now_add=True)
 
 
@@ -63,20 +78,27 @@ class PlatformSettings(models.Model):
     review_moderation_enabled = models.BooleanField(default=True)
     announcements_enabled = models.BooleanField(default=True)
     email_notifications_enabled = models.BooleanField(default=True)
+    notification_channels = models.JSONField(default=default_notification_channels)
+    whatsapp_phone_number_id = models.CharField(max_length=80, blank=True)
     report_notifications_enabled = models.BooleanField(default=True)
     terms_text = models.TextField(default="These terms govern the use of the Tarmac student marketplace.")
     privacy_text = models.TextField(default="""Tarmac uses account information to provide student verification, marketplace, lost-and-found, messaging, and support services.
 
-Private information such as your email address, phone number, WhatsApp number, matriculation number, student ID card, verification documents, private report evidence, and account support details is not shown to other students, sold, or publicly disclosed. Access is limited to authorized Tarmac administrators who need the information to verify accounts, prevent abuse, provide support, or protect platform safety.
+Student ID cards and graduation proofs are stored securely only while a manual verification request is pending and are accessible only to authorized Tarmac reviewers. The image is deleted from Tarmac's database and media storage when the request is approved or rejected. ID images are not retained for automatic approvals. Matriculation numbers and verification outcomes remain private account records and are never shown on public profiles.
 
-Tarmac will not disclose private account details to other students or members of the public. Private information is disclosed to authorized school authorities only when they request it. Student ID images and matriculation numbers are not shown on public profiles.
+The clear profile photo you provide is saved on your account for identity and account security. It is hidden from other students by default. You can choose to show it to verified Tarmac students in Marketplace privacy settings. Your email, phone and WhatsApp numbers, matriculation number, verification documents, private report evidence and support details are not shown to other students or the public.
 
-Some information you choose to place on your profile, such as your name, username, profile photo, department, level, and bio, is visible to signed-in verified students. Marketplace listings, reviews, and messages are visible to the people who use those features; authorized administrators may review them when needed for moderation, reports, or support. Lost-and-found contact details and report evidence are not displayed on public listings.""")
+Private account information is not disclosed to other students or members of the public. It is disclosed to authorized school authorities only when they request it. Authorized Tarmac administrators can access information needed to verify accounts, prevent abuse, provide support, or protect platform safety.
+
+Marketplace listings, reviews and messages are visible to the people who use those features; authorized administrators may review them when needed for moderation, reports or support. Lost-and-found contact details and report evidence are not displayed on public listings.""")
     community_guidelines_text = models.TextField(default="Students must treat other members with respect and use Tarmac responsibly.")
     maintenance_mode = models.BooleanField(default=False)
     maintenance_message = models.CharField(max_length=240, default="Tarmac is temporarily unavailable.")
     marketplace_enabled = models.BooleanField(default=True)
     lost_found_enabled = models.BooleanField(default=True)
+    jobs_enabled = models.BooleanField(default=True)
+    external_job_submissions_enabled = models.BooleanField(default=True)
+    job_listing_approval_required = models.BooleanField(default=True)
     messaging_enabled = models.BooleanField(default=True)
     ads_enabled = models.BooleanField(default=True)
     ad_slide_duration_seconds = models.PositiveIntegerField(default=300)

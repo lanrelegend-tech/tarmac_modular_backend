@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "apps.lost_found.apps.LostFoundConfig", "apps.messaging.apps.MessagingConfig",
     "apps.notifications.apps.NotificationsConfig", "apps.administration.apps.AdministrationConfig",
     "apps.reviews.apps.ReviewsConfig",
+    "apps.jobs.apps.JobsConfig",
 ]
 MIDDLEWARE = ["django.middleware.security.SecurityMiddleware", "whitenoise.middleware.WhiteNoiseMiddleware", "corsheaders.middleware.CorsMiddleware",
     "config.middleware.MaintenanceModeMiddleware",
@@ -88,11 +89,23 @@ PRIVATE_MEDIA_ROOT = BASE_DIR / "private_media"
 DATA_UPLOAD_MAX_MEMORY_SIZE = 27 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-CORS_ALLOWED_ORIGINS = [os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")]
-CSRF_TRUSTED_ORIGINS = [x.strip() for x in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if x.strip()]
+CORS_ALLOWED_ORIGINS = [x.strip() for x in os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").split(",") if x.strip()]
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(
+    [x.strip() for x in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if x.strip()]
+    + CORS_ALLOWED_ORIGINS
+))
 SECURE_SSL_REDIRECT = (os.getenv("SECURE_SSL_REDIRECT") or ("False" if DEBUG else "True")).lower() == "true"
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
+AUTH_COOKIE_SECURE = (os.getenv("AUTH_COOKIE_SECURE") or ("False" if DEBUG else "True")).lower() == "true"
+AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE") or ("Lax" if DEBUG else "None")
+AUTH_ACCESS_COOKIE = os.getenv("AUTH_ACCESS_COOKIE", "tarmac_access")
+AUTH_REFRESH_COOKIE = os.getenv("AUTH_REFRESH_COOKIE", "tarmac_refresh")
+CSRF_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
+CSRF_COOKIE_HTTPONLY = True
+if AUTH_COOKIE_SAMESITE == "None" and not AUTH_COOKIE_SECURE:
+    raise ImproperlyConfigured("SameSite=None auth cookies require AUTH_COOKIE_SECURE=True.")
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
 SECURE_HSTS_SECONDS = 0 if DEBUG else int(os.getenv("SECURE_HSTS_SECONDS") or "31536000")
@@ -119,7 +132,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend", "rest_framework.filters.SearchFilter", "rest_framework.filters.OrderingFilter"],
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"anon": os.getenv("ANON_THROTTLE_RATE", "30/hour"), "user": os.getenv("USER_THROTTLE_RATE", "1000/day"), "payment_initialization": "10/hour", "account_action": "10/hour"},
+    "DEFAULT_THROTTLE_RATES": {"anon": os.getenv("ANON_THROTTLE_RATE", "30/hour"), "user": os.getenv("USER_THROTTLE_RATE", "1000/day"), "payment_initialization": "10/hour", "account_action": "10/hour", "presence": "40/hour", "external_job_submission": "5/hour", "external_job_manage": "30/hour"},
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": int(os.getenv("API_PAGE_SIZE", "25")),
 }

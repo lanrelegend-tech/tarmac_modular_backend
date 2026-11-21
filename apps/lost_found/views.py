@@ -13,7 +13,7 @@ from .models import LostFoundReport,ItemMatch,ItemMatchReview,ItemClaim
 from .serializers import LostFoundReportSerializer,ItemMatchSerializer,ItemClaimSerializer
 from .services import create_possible_matches
 from apps.notifications.services import notify_user
-from apps.messaging.models import Conversation
+from apps.messaging.models import Conversation, BlockedUser
 from apps.messaging.serializers import ConversationSerializer
 class LostFoundReportViewSet(viewsets.ModelViewSet):
     platform_feature = "lost_found_enabled"
@@ -86,6 +86,8 @@ class ItemMatchViewSet(viewsets.ReadOnlyModelViewSet):
         other = match.found_report.reporter if request.user.pk == match.lost_report.reporter_id else match.lost_report.reporter
         if other.pk == request.user.pk or not is_student_feature_eligible(other):
             raise PermissionDenied("The other student is not available for messaging.")
+        if BlockedUser.objects.filter(blocked_by__in=(request.user, other), blocked_user__in=(request.user, other)).exists():
+            raise PermissionDenied("Messaging is unavailable because one account has blocked the other.")
         title = f"Lost and found match: {match.lost_report.title} / {match.found_report.title}"[:180]
         conversation = Conversation.objects.annotate(participant_count=Count("participants", distinct=True)).filter(
             context_type=Conversation.ContextType.LOST_FOUND, context_id=match.pk, participant_count=2,
@@ -98,6 +100,9 @@ class ItemMatchViewSet(viewsets.ReadOnlyModelViewSet):
                 context_title=title,
             )
             conversation.participants.add(request.user, other)
+            from apps.messaging.serializers import create_participant_snapshot
+            create_participant_snapshot(conversation, request.user)
+            create_participant_snapshot(conversation, other)
         return Response(ConversationSerializer(conversation, context={"request": request}).data, status=status.HTTP_200_OK)
     @action(detail=True, methods=["post"])
     def review(self, request, pk=None):

@@ -14,6 +14,25 @@ from apps.notifications.email import send_tarmac_email
 logger = logging.getLogger(__name__)
 
 
+def delete_verification_id_image(verification):
+    """Delete the temporary ID upload from its backing storage and clear the field."""
+    image = verification.student_id_image
+    if not image:
+        return False
+    image.delete(save=False)
+    verification.student_id_image = None
+    return True
+
+
+def save_account_profile_photo(user, uploaded_photo):
+    old_name = user.profile_picture.name if user.profile_picture else None
+    old_storage = user.profile_picture.storage if user.profile_picture else None
+    user.profile_picture.save(uploaded_photo.name, uploaded_photo, save=False)
+    user.save(update_fields=("profile_picture",))
+    if old_name and old_storage and old_name != user.profile_picture.name:
+        old_storage.delete(old_name)
+
+
 def issue_account_action_token(user, purpose):
     now = timezone.now()
     AccountActionToken.objects.filter(user=user, purpose=purpose, used_at__isnull=True).update(used_at=now)

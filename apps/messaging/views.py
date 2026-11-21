@@ -11,18 +11,156 @@ from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 import mimetypes
 from .models import Conversation,Message,MessageAttachment
-from .serializers import ConversationSerializer,MessageSerializer
+from .serializers import ConversationSerializer,MessageSerializer,BlockedUserSerializer
+from .models import BlockedUser
 from apps.notifications.services import notify_user
 class ConversationViewSet(viewsets.ModelViewSet):
     platform_feature = "messaging_enabled"
     serializer_class=ConversationSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
-    def get_queryset(self): return Conversation.objects.filter(participants=self.request.user)
+    def get_queryset(self):
+        queryset = Conversation.objects.filter(participants=self.request.user).prefetch_related("participants", "participant_snapshots")
+        identity_type = self.request.query_params.get("identity_type")
+        if identity_type in ("normal", "anonymous"):
+            queryset = queryset.filter(participant_snapshots__user=self.request.user, participant_snapshots__identity_type=identity_type)
+        return queryset.distinct()
+    def create(self, request, *args, **kwargs):
+        raise PermissionDenied("Start a conversation from a marketplace listing, lost-and-found match, or official support message.")
+    @action(detail=True, methods=["post"], url_path="block")
+    def block(self, request, pk=None):
+        conversation = self.get_object()
+        if conversation.is_official:
+            raise PermissionDenied("Official Tarmac messages cannot be blocked here. Contact support if you need help.")
+        other = conversation.participants.exclude(pk=request.user.pk).filter(is_staff=False).first()
+        if not other:
+            raise ValidationError("This conversation does not have another student to block.")
+        BlockedUser.objects.get_or_create(blocked_by=request.user, blocked_user=other)
+        return Response({"blocked": True})
     def perform_create(self,serializer):
         participants = serializer.validated_data.get("participants", [])
         other_users = [user for user in participants if user.pk != self.request.user.pk]
         if len(other_users) != 1 or not is_student_feature_eligible(other_users[0]):
             raise ValidationError({"participants": "A conversation must be with exactly one other active student account."})
         convo=serializer.save(); convo.participants.add(self.request.user)
+        from .serializers import create_participant_snapshot
+        for person in convo.participants.all():
+            create_participant_snapshot(convo, person)
+
+    @action(detail=False, methods=["post"], url_path="start-marketplace")
+    @transaction.atomic
+    def start_marketplace(self, request):
+        from apps.products.models import Product, ProductAudienceGrant
+        from .serializers import create_participant_snapshot
+        try:
+            product_id = int(request.data.get("product_id"))
+        except (TypeError, ValueError):
+            raise ValidationError({"product_id": "Choose a valid listing."})
+        product = Product.objects.select_for_update().select_related("seller", "anonymous_identity").filter(pk=product_id, status=Product.Status.ACTIVE, seller__is_active=True, seller__is_suspended=False).first()
+        if not product or product.seller_id == request.user.pk:
+            raise ValidationError({"product_id": "This listing cannot be contacted."})
+        if product.identity_type == Product.IdentityType.ANONYMOUS and (not product.anonymous_identity_id or not product.anonymous_identity.is_enabled):
+            raise ValidationError({"product_id": "This marketplace identity is unavailable."})
+        if product.visibility == Product.Visibility.DRAFT:
+            raise PermissionDenied("This listing is private.")
+        if product.visibility == Product.Visibility.INVITE_ONLY and not ProductAudienceGrant.objects.filter(product=product, user=request.user).exists():
+            raise PermissionDenied("This listing is only visible to students invited by its owner.")
+        if not is_student_feature_eligible(product.seller):
+            raise ValidationError({"product_id": "This seller cannot currently receive messages."})
+        if BlockedUser.objects.filter(blocked_by__in=(request.user, product.seller), blocked_user__in=(request.user, product.seller)).exists():
+            raise PermissionDenied("Messaging is unavailable because one account has blocked the other.")
+        identity_type = request.data.get("identity_type", "normal")
+        if identity_type not in ("normal", "anonymous"):
+            raise ValidationError({"identity_type": "Choose normal or anonymous identity."})
+        if identity_type == "anonymous" and (not getattr(request.user, "anonymous_marketplace_identity", None) or not request.user.anonymous_marketplace_identity.is_enabled):
+            raise ValidationError({"identity_type": "Create an anonymous marketplace identity first."})
+        existing_conversations = Conversation.objects.filter(context_type=Conversation.ContextType.MARKETPLACE, context_id=product.pk, participants=request.user).filter(participants=product.seller).prefetch_related("participant_snapshots")
+        expected_identity = getattr(request.user, "anonymous_marketplace_identity", None) if identity_type == "anonymous" else None
+        target_identity_type = "anonymous" if product.identity_type == Product.IdentityType.ANONYMOUS else "normal"
+        target_public_id = str(product.anonymous_identity.public_id) if target_identity_type == "anonymous" else str(product.seller.public_id)
+        conversation = next((row for row in existing_conversations if (snapshot := next((item for item in row.participant_snapshots.all() if item.user_id == request.user.pk), None)) and snapshot.identity_type == identity_type and snapshot.public_identity_id == (str(expected_identity.public_id) if expected_identity else str(request.user.public_id)) and (target_snapshot := next((item for item in row.participant_snapshots.all() if item.user_id == product.seller_id), None)) and target_snapshot.identity_type == target_identity_type and target_snapshot.public_identity_id == target_public_id), None)
+        if not conversation:
+            conversation = Conversation.objects.create(context_type=Conversation.ContextType.MARKETPLACE, context_id=product.pk, context_title=product.title)
+            conversation.participants.add(request.user, product.seller)
+            create_participant_snapshot(conversation, request.user, identity_type=identity_type)
+            create_participant_snapshot(conversation, product.seller, identity_type="anonymous" if product.identity_type == Product.IdentityType.ANONYMOUS else "normal")
+        return Response(self.get_serializer(conversation).data, status=201)
+
+    @action(detail=False, methods=["post"], url_path="start-job")
+    @transaction.atomic
+    def start_job(self, request):
+        from apps.jobs.models import JobListing
+        from .serializers import create_participant_snapshot
+        try:
+            job_id = int(request.data.get("job_id"))
+        except (TypeError, ValueError):
+            raise ValidationError({"job_id": "Choose a valid job or gig."})
+        job = JobListing.objects.select_for_update().select_related("owner", "anonymous_identity").filter(
+            pk=job_id, status=JobListing.Status.ACTIVE, deadline__gte=timezone.localdate()
+        ).first()
+        if not job or not job.owner_id or job.owner_id == request.user.pk:
+            raise ValidationError({"job_id": "This student listing cannot be contacted."})
+        if not is_student_feature_eligible(job.owner):
+            raise ValidationError({"job_id": "This student cannot currently receive messages."})
+        if BlockedUser.objects.filter(blocked_by__in=(request.user, job.owner), blocked_user__in=(request.user, job.owner)).exists():
+            raise PermissionDenied("Messaging is unavailable because one account has blocked the other.")
+        identity_type = request.data.get("identity_type", "normal")
+        if identity_type not in ("normal", "anonymous"):
+            raise ValidationError({"identity_type": "Choose normal or anonymous identity."})
+        my_alias = getattr(request.user, "anonymous_marketplace_identity", None) if identity_type == "anonymous" else None
+        if identity_type == "anonymous" and (not my_alias or not my_alias.is_enabled):
+            raise ValidationError({"identity_type": "Create and enable an anonymous marketplace identity first."})
+        target_identity_type = job.identity_type if job.identity_type == "anonymous" and job.anonymous_identity_id and job.anonymous_identity.is_enabled else "normal"
+        candidates = Conversation.objects.filter(
+            context_type=Conversation.ContextType.JOBS, context_id=job.pk,
+            participants=request.user,
+        ).filter(participants=job.owner).prefetch_related("participant_snapshots")
+        my_public_id = str(my_alias.public_id) if my_alias else str(request.user.public_id)
+        target_public_id = str(job.anonymous_identity.public_id) if target_identity_type == "anonymous" else str(job.owner.public_id)
+        conversation = next((row for row in candidates if (mine := next((snap for snap in row.participant_snapshots.all() if snap.user_id == request.user.pk), None)) and mine.identity_type == identity_type and mine.public_identity_id == my_public_id and (theirs := next((snap for snap in row.participant_snapshots.all() if snap.user_id == job.owner_id), None)) and theirs.identity_type == target_identity_type and theirs.public_identity_id == target_public_id), None)
+        if not conversation:
+            conversation = Conversation.objects.create(
+                context_type=Conversation.ContextType.JOBS,
+                context_id=job.pk, context_title=job.title,
+            )
+            conversation.participants.add(request.user, job.owner)
+            create_participant_snapshot(conversation, request.user, identity_type=identity_type)
+            create_participant_snapshot(conversation, job.owner, identity_type=target_identity_type)
+        return Response(self.get_serializer(conversation).data, status=201)
+
+    @action(detail=False, methods=["post"], url_path="start-profile")
+    @transaction.atomic
+    def start_profile(self, request):
+        from apps.accounts.models import AnonymousMarketplaceIdentity, User
+        from .serializers import create_participant_snapshot
+        public_id = request.data.get("identity_public_id")
+        identity_type = request.data.get("identity_type", "normal")
+        my_identity_type = request.data.get("my_identity_type", "normal")
+        if identity_type not in ("normal", "anonymous") or not public_id:
+            raise ValidationError({"identity_public_id": "Choose a valid public marketplace profile."})
+        if my_identity_type not in ("normal", "anonymous"):
+            raise ValidationError({"my_identity_type": "Choose normal or anonymous identity."})
+        alias = None
+        if identity_type == "anonymous":
+            alias = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=public_id, is_enabled=True).first()
+            target = alias.user if alias else None
+        else:
+            target = User.objects.filter(public_id=public_id, public_profile_enabled=True).first()
+        if not target or target.pk == request.user.pk or not is_student_feature_eligible(target):
+            raise ValidationError({"identity_public_id": "This marketplace profile is not available for messaging."})
+        if BlockedUser.objects.filter(blocked_by__in=(request.user, target), blocked_user__in=(request.user, target)).exists():
+            raise PermissionDenied("Messaging is unavailable because one account has blocked the other.")
+        expected_public_id = str(alias.public_id) if alias else str(target.public_id)
+        my_alias = getattr(request.user, "anonymous_marketplace_identity", None) if my_identity_type == "anonymous" else None
+        if my_identity_type == "anonymous" and (not my_alias or not my_alias.is_enabled):
+            raise ValidationError({"my_identity_type": "Create and enable an anonymous marketplace identity first."})
+        candidates = Conversation.objects.filter(context_type=Conversation.ContextType.GENERAL, participants=request.user).filter(participants=target).prefetch_related("participant_snapshots")
+        expected_my_public_id = str(my_alias.public_id) if my_alias else str(request.user.public_id)
+        conversation = next((row for row in candidates if (snapshot := next((item for item in row.participant_snapshots.all() if item.user_id == target.pk), None)) and snapshot.identity_type == identity_type and snapshot.public_identity_id == expected_public_id and (my_snapshot := next((item for item in row.participant_snapshots.all() if item.user_id == request.user.pk), None)) and my_snapshot.identity_type == my_identity_type and my_snapshot.public_identity_id == expected_my_public_id), None)
+        if not conversation:
+            conversation = Conversation.objects.create(context_type=Conversation.ContextType.GENERAL, context_title="Marketplace profile")
+            conversation.participants.add(request.user, target)
+            create_participant_snapshot(conversation, request.user, identity_type=my_identity_type)
+            create_participant_snapshot(conversation, target, identity_type=identity_type)
+        return Response(self.get_serializer(conversation).data, status=201)
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):
         conversation = self.get_object()
@@ -36,10 +174,16 @@ class ConversationViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             raise ValidationError({"product_id": "Choose a valid marketplace listing."})
         from apps.products.models import Product
-        product = Product.objects.filter(pk=product_id, status=Product.Status.ACTIVE).first()
+        product = Product.objects.select_related("seller", "anonymous_identity").filter(pk=product_id, status=Product.Status.ACTIVE, seller__is_active=True, seller__is_suspended=False).first()
         participants = list(conversation.participants.all())
         if not product or len(participants) != 2 or product.seller_id not in {person.pk for person in participants}:
             raise ValidationError({"product_id": "The active listing's seller must be part of this conversation."})
+        if product.visibility == Product.Visibility.INVITE_ONLY and not product.audience_grants.filter(user=request.user).exists():
+            raise PermissionDenied("This listing is only visible to students invited by its owner.")
+        if product.identity_type == Product.IdentityType.ANONYMOUS and (not product.anonymous_identity_id or not product.anonymous_identity.is_enabled):
+            raise PermissionDenied("This marketplace identity is unavailable.")
+        if BlockedUser.objects.filter(blocked_by__in=(request.user, product.seller), blocked_user__in=(request.user, product.seller)).exists():
+            raise PermissionDenied("Messaging is unavailable because one account has blocked the other.")
         if conversation.context_type == Conversation.ContextType.GENERAL:
             conversation.context_type = Conversation.ContextType.MARKETPLACE
             conversation.context_id = product.pk
@@ -47,12 +191,16 @@ class ConversationViewSet(viewsets.ModelViewSet):
             conversation.save(update_fields=("context_type", "context_id", "context_title", "updated_at"))
         elif conversation.context_type != Conversation.ContextType.MARKETPLACE or conversation.context_id != product.pk:
             raise ValidationError({"detail": "This conversation is linked to a different Tarmac feature."})
+        from .serializers import create_participant_snapshot
+        for person in participants:
+            if not conversation.participant_snapshots.filter(user=person).exists():
+                create_participant_snapshot(conversation, person, identity_type=("anonymous" if person.pk == product.seller_id and product.identity_type == Product.IdentityType.ANONYMOUS else "normal"))
         return Response(self.get_serializer(conversation).data)
     @action(detail=True, methods=["post"])
     @transaction.atomic
     def complete(self, request, pk=None):
         conversation = Conversation.objects.select_for_update().get(pk=self.get_object().pk)
-        if conversation.context_type not in (Conversation.ContextType.GENERAL, Conversation.ContextType.MARKETPLACE, Conversation.ContextType.LOST_FOUND):
+        if conversation.context_type not in (Conversation.ContextType.GENERAL, Conversation.ContextType.MARKETPLACE, Conversation.ContextType.LOST_FOUND, Conversation.ContextType.JOBS):
             raise ValidationError({"detail": "Only student conversations can be completed here."})
         participants = list(conversation.participants.filter(is_staff=False))
         if request.user not in participants or len(participants) != 2:
@@ -69,13 +217,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
         if all_confirmed:
             conversation.status = Conversation.Status.RESOLVED
             conversation.completed_at = completion_event_at
-            if conversation.context_type == Conversation.ContextType.MARKETPLACE:
-                from apps.products.models import Product
-                product = Product.objects.select_for_update().filter(pk=conversation.context_id, seller_id__in=[person.pk for person in participants]).first()
-                if product and product.status == Product.Status.ACTIVE:
-                    product.status = Product.Status.SOLD
-                    product.save(update_fields=("status", "updated_at"))
-            elif conversation.context_type == Conversation.ContextType.LOST_FOUND:
+            if conversation.context_type == Conversation.ContextType.LOST_FOUND:
                 from apps.lost_found.models import ItemMatch, LostFoundReport
                 match = ItemMatch.objects.select_for_update().filter(pk=conversation.context_id, is_dismissed=False).select_related("lost_report", "found_report").first()
                 if match and {match.lost_report.reporter_id, match.found_report.reporter_id} == {person.pk for person in participants}:
@@ -101,6 +243,9 @@ class MessageViewSet(viewsets.ModelViewSet):
     def perform_create(self,serializer):
         convo=serializer.validated_data["conversation"]
         if not convo.participants.filter(pk=self.request.user.pk).exists(): raise PermissionDenied("You are not a participant in this conversation.")
+        other_ids = convo.participants.exclude(pk=self.request.user.pk).values_list("pk", flat=True)
+        if BlockedUser.objects.filter(blocked_by__in=[self.request.user.pk, *other_ids], blocked_user__in=[self.request.user.pk, *other_ids]).exists():
+            raise PermissionDenied("Messaging is unavailable because one account has blocked the other.")
         serializer.save(sender=self.request.user)
         if convo.status == Conversation.Status.RESOLVED:
             convo.status = Conversation.Status.OPEN
@@ -116,6 +261,15 @@ class MessageViewSet(viewsets.ModelViewSet):
         if instance.sender_id != self.request.user.id:
             raise PermissionDenied("Only the message sender can delete this message.")
         instance.delete()
+
+class BlockedUserViewSet(viewsets.ModelViewSet):
+    serializer_class = BlockedUserSerializer
+    permission_classes = [IsVerifiedStudent]
+    http_method_names = ["get", "post", "delete", "head", "options"]
+    def get_queryset(self):
+        return BlockedUser.objects.filter(blocked_by=self.request.user).select_related("blocked_user")
+    def perform_create(self, serializer):
+        serializer.save()
 
 @api_view(["GET"])
 @permission_classes([permissions.IsAuthenticated])

@@ -2,13 +2,12 @@ from rest_framework import serializers
 from .models import LostFoundReport,ItemMatch,ItemClaim
 from django.utils import timezone
 class LostFoundReportSerializer(serializers.ModelSerializer):
-    reporter_id=serializers.IntegerField(read_only=True)
     image = serializers.ImageField(write_only=True, required=False, allow_null=True)
     identifying_details = serializers.CharField(write_only=True, required=False, allow_blank=True)
     contact_details = serializers.CharField(write_only=True, required=False, allow_blank=True)
     category_name = serializers.CharField(source="category.name", read_only=True)
     image_url = serializers.SerializerMethodField()
-    class Meta: model=LostFoundReport; fields=("id","reporter_id","report_type","title","description","category","category_name","colour","location","incident_date","identifying_details","contact_details","image","image_url","status","created_at"); read_only_fields=("status","created_at")
+    class Meta: model=LostFoundReport; fields=("id","report_type","title","description","category","category_name","colour","location","incident_date","identifying_details","contact_details","image","image_url","status","created_at"); read_only_fields=("status","created_at")
     def get_image_url(self, obj):
         if not obj.image:
             return None
@@ -26,16 +25,14 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
 class ItemMatchSerializer(serializers.ModelSerializer):
     lost_title = serializers.CharField(source="lost_report.title", read_only=True)
     found_title = serializers.CharField(source="found_report.title", read_only=True)
-    lost_reporter_id = serializers.IntegerField(source="lost_report.reporter_id", read_only=True)
-    found_reporter_id = serializers.IntegerField(source="found_report.reporter_id", read_only=True)
-    class Meta: model=ItemMatch; fields=("id", "lost_report", "lost_title", "lost_reporter_id", "found_report", "found_title", "found_reporter_id", "score", "reasons", "created_at"); read_only_fields=fields
+    class Meta: model=ItemMatch; fields=("id", "lost_report", "lost_title", "found_report", "found_title", "score", "reasons", "created_at"); read_only_fields=fields
 
 class ItemClaimSerializer(serializers.ModelSerializer):
     claimant_name = serializers.SerializerMethodField()
     evidence_url = serializers.SerializerMethodField()
     class Meta:
         model = ItemClaim
-        fields = ("id", "report", "claimant", "claimant_name", "details", "evidence", "evidence_name", "evidence_url", "status", "reviewer_note", "created_at", "reviewed_at")
+        fields = ("id", "report", "claimant_name", "details", "evidence", "evidence_name", "evidence_url", "status", "reviewer_note", "created_at", "reviewed_at")
         read_only_fields = ("id", "claimant", "claimant_name", "evidence_name", "evidence_url", "status", "reviewer_note", "created_at", "reviewed_at")
     def get_claimant_name(self, obj): return obj.claimant.get_full_name().strip() or obj.claimant.username
     def get_evidence_url(self, obj):

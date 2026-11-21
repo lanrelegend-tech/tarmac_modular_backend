@@ -1,6 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
+import os
 
 from apps.accounts.models import User
 from apps.administration.models import Announcement, PlatformSettings
@@ -42,6 +43,25 @@ class Command(BaseCommand):
                             is_sent=True, dedupe_key=f"announcement:{announcement.pk}:{user_id}:in_app", created_at=now)
                         for user_id in recipient_ids
                     ], ignore_conflicts=True)
+                    channels = (platform.notification_channels or {}).get("promotional", {})
+                    if platform.email_notifications_enabled and channels.get("email", True):
+                        email_ids = User.objects.filter(pk__in=recipient_ids, notification_email_enabled=True).values_list("pk", flat=True)
+                        Notification.objects.bulk_create([
+                            Notification(user_id=user_id, channel=Notification.Channel.EMAIL, subject=announcement.title,
+                                body=announcement.body, data={"kind":"announcement", "display":"popup", "announcement_id":announcement.pk, "notification_category":"promotional"},
+                                is_sent=False, dedupe_key=f"announcement:{announcement.pk}:{user_id}:email", created_at=now)
+                            for user_id in email_ids
+                        ], ignore_conflicts=True)
+                    template = os.getenv("WHATSAPP_PROMOTION_TEMPLATE", "")
+                    sender_id = platform.whatsapp_phone_number_id or os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+                    if channels.get("whatsapp", False) and template and sender_id and os.getenv("WHATSAPP_ACCESS_TOKEN"):
+                        whatsapp_ids = User.objects.filter(pk__in=recipient_ids, notification_whatsapp_enabled=True, whatsapp_consent_at__isnull=False).exclude(whatsapp_number="").values_list("pk", flat=True)
+                        Notification.objects.bulk_create([
+                            Notification(user_id=user_id, channel=Notification.Channel.WHATSAPP, subject=announcement.title,
+                                body=announcement.body, data={"kind":"announcement", "whatsapp_template_kind":"promotion", "template_parameter":announcement.title[:140], "announcement_id":announcement.pk, "notification_category":"promotional"},
+                                is_sent=False, dedupe_key=f"announcement:{announcement.pk}:{user_id}:whatsapp", created_at=now)
+                            for user_id in whatsapp_ids
+                        ], ignore_conflicts=True)
                     announcement.delivery_cursor = recipient_ids[-1]
                     announcement.recipient_count += len(recipient_ids)
                     announcement.delivery_completed = len(recipient_ids) < batch_size

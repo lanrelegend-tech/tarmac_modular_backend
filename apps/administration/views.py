@@ -1,6 +1,10 @@
 from datetime import timedelta
+import hashlib
+import os
+import secrets
 import uuid
 import mimetypes
+from urllib.parse import urlencode
 from django.db import transaction
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
@@ -16,9 +20,9 @@ from django.db.models import Prefetch
 from django.utils import timezone
 from apps.accounts.permissions import IsVerifiedStudent
 from apps.accounts.permissions import is_student_feature_eligible
-from apps.accounts.models import User, ProfileChangeRequest, ProfileChangeMessage
+from apps.accounts.models import User, ProfileChangeRequest, ProfileChangeMessage, CourseProgram, AccountActionToken
 from apps.accounts.models import StudentVerification
-from apps.reviews.models import SellerReview
+from apps.reviews.models import ReviewReport, SellerReview
 from apps.products.models import Product
 from apps.payments.models import Payment
 from apps.lost_found.models import LostFoundReport, ItemMatch, ItemClaim
@@ -26,7 +30,7 @@ from apps.ads.models import AdCampaign
 from apps.messaging.models import Conversation, Message
 from apps.messaging.serializers import MessageSerializer
 from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
-from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminAccountSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
+from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
 from apps.notifications.services import notify_user
 class UserReportViewSet(viewsets.ModelViewSet):
@@ -164,17 +168,27 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
                 raise ValidationError({"status": "This matric number is already assigned to another account."})
             user.matric_number = verification.submitted_matric_number
             user.is_student_verified = True
-            user.save(update_fields=("matric_number", "is_student_verified"))
+            user.verified_affiliation = verification.requested_affiliation
+            user.student_status_override = None
+            user.save(update_fields=("matric_number", "is_student_verified", "verified_affiliation", "student_status_override"))
         else:
             user.is_student_verified = False
-            user.save(update_fields=("is_student_verified",))
+            user.verified_affiliation = None
+            user.student_status_override = None
+            user.save(update_fields=("is_student_verified", "verified_affiliation", "student_status_override"))
         verification.status = status_value
         verification.reviewer_note = serializer.validated_data.get("reviewer_note", verification.reviewer_note)
         verification.reviewed_by = self.request.user
         verification.reviewed_at = timezone.now()
-        verification.save(update_fields=("status", "reviewer_note", "reviewed_by", "reviewed_at"))
+        from apps.accounts.services import delete_verification_id_image
+        has_id_image = delete_verification_id_image(verification)
+        fields_to_save = ["status", "reviewer_note", "reviewed_by", "reviewed_at"]
+        if has_id_image:
+            fields_to_save.append("student_id_image")
+        verification.save(update_fields=fields_to_save)
         AdminLog.objects.create(actor=self.request.user, action=f"student_verification_{status_value}", target_type="StudentVerification", target_id=str(verification.pk), metadata={"user_id": user.pk})
-        notify_user(user, "Student verification reviewed", "Your student verification was approved." if status_value == StudentVerification.Status.APPROVED else "Your student verification needs attention. Sign in to review the school's note.", {"kind": "verification_review", "status": status_value}, f"verification-reviewed:{verification.pk}:{status_value}")
+        approved_label = "alumni" if verification.requested_affiliation == "alumni" else "student"
+        notify_user(user, "Tarmac verification reviewed", f"Your {approved_label} verification was approved." if status_value == StudentVerification.Status.APPROVED else "Your verification needs attention. Sign in to review the school's note.", {"kind": "verification_review", "status": status_value}, f"verification-reviewed:{verification.pk}:{status_value}")
 
     @action(detail=True, methods=["get"], url_path="student-id")
     def student_id(self, request, pk=None):
@@ -190,14 +204,28 @@ class AdminReviewViewSet(viewsets.ModelViewSet):
     serializer_class = AdminReviewSerializer
     permission_classes = [permissions.IsAdminUser]
     http_method_names = ["get", "patch", "delete", "head", "options"]
-    filterset_fields = ["status", "rating"]
+    filterset_fields = ["status", "rating", "category"]
 
     def perform_update(self, serializer):
         review = serializer.save()
         AdminLog.objects.create(actor=self.request.user, action=f"seller_review_{review.status}", target_type="SellerReview", target_id=str(review.pk), metadata={"seller_id": review.seller_id})
 
+class AdminReviewReportViewSet(viewsets.ModelViewSet):
+    queryset = ReviewReport.objects.select_related("review", "review__seller", "review__reviewer", "reporter").all()
+    serializer_class = AdminReviewReportSerializer
+    permission_classes = [permissions.IsAdminUser]
+    http_method_names = ["get", "patch", "head", "options"]
+    filterset_fields = ["status", "reason"]
+
+    def perform_update(self, serializer):
+        report = serializer.save()
+        if report.status in (ReviewReport.Status.RESOLVED, ReviewReport.Status.DISMISSED):
+            report.resolved_at = timezone.now()
+            report.save(update_fields=("resolved_at",))
+        AdminLog.objects.create(actor=self.request.user, action=f"review_report_{report.status}", target_type="ReviewReport", target_id=str(report.pk), metadata={"review_id": report.review_id, "review_status": report.review.status})
+
 class AdminAccountViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all().order_by("-date_joined")
+    queryset = User.objects.select_related("course").all().order_by("-date_joined")
     serializer_class = AdminAccountSerializer
     permission_classes = [permissions.IsAdminUser]
     http_method_names = ["get", "patch", "head", "options"]
@@ -209,6 +237,85 @@ class AdminAccountViewSet(viewsets.ModelViewSet):
             for outstanding in OutstandingToken.objects.filter(user=account):
                 BlacklistedToken.objects.get_or_create(token=outstanding)
         AdminLog.objects.create(actor=self.request.user, action="student_account_updated", target_type="User", target_id=str(account.pk), metadata={"is_active": account.is_active, "is_suspended": account.is_suspended})
+
+    @action(detail=True, methods=["post"], url_path="enforcement")
+    @transaction.atomic
+    def enforcement(self, request, pk=None):
+        account = User.objects.select_for_update().get(pk=pk)
+        if account.role != User.Role.STUDENT or account.is_staff:
+            raise ValidationError({"action": "Only student accounts can be suspended or banned here."})
+        action_value = request.data.get("action")
+        if action_value not in ("suspend", "ban", "restore"):
+            raise ValidationError({"action": "Choose suspend, ban, or restore."})
+        reason = str(request.data.get("reason", "")).strip()
+        if action_value in ("suspend", "ban") and len(reason) < 5:
+            raise ValidationError({"reason": "Add a reason of at least 5 characters."})
+
+        if action_value == "suspend":
+            account.is_active = True
+            account.is_suspended = True
+            subject = "Your Tarmac account has been suspended"
+            body = f"Your Tarmac account has been temporarily suspended by an administrator. Reason: {reason}\n\nYou cannot sign in while the suspension is active. You may submit an appeal within 7 days using the button below."
+            appeal_token = secrets.token_urlsafe(32)
+            AccountActionToken.objects.filter(user=account, purpose=AccountActionToken.Purpose.SUSPENSION_APPEAL, used_at__isnull=True).update(used_at=timezone.now())
+            AccountActionToken.objects.create(user=account, purpose=AccountActionToken.Purpose.SUSPENSION_APPEAL, token_hash=hashlib.sha256(appeal_token.encode()).hexdigest(), expires_at=timezone.now() + timedelta(days=7))
+            email_url = f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').rstrip('/')}/suspension-appeal?{urlencode({'token': appeal_token})}"
+            audit_action = "student_account_suspended"
+        elif action_value == "ban":
+            account.is_active = False
+            account.is_suspended = False
+            subject = "Your Tarmac account has been banned"
+            support_email = PlatformSettings.get_solo().support_email or os.getenv("SUPPORT_EMAIL", "")
+            body = f"Your Tarmac account has been banned by an administrator. Reason: {reason}\n\nIf you believe this was a mistake, contact Tarmac Support{f' at {support_email}' if support_email else ''}."
+            email_url = ""
+            audit_action = "student_account_banned"
+        else:
+            account.is_active = True
+            account.is_suspended = False
+            subject = "Your Tarmac account access has been restored"
+            body = "An administrator has restored access to your Tarmac account. You can sign in again."
+            email_url = f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').rstrip('/')}/login"
+            audit_action = "student_account_restored"
+
+        account.save(update_fields=("is_active", "is_suspended"))
+        if not account.is_active or account.is_suspended:
+            for outstanding in OutstandingToken.objects.filter(user=account):
+                BlacklistedToken.objects.get_or_create(token=outstanding)
+        AdminLog.objects.create(actor=request.user, action=audit_action, target_type="User", target_id=str(account.pk), metadata={"reason": reason})
+
+        security_parameter = f"Submit an appeal: {email_url}" if email_url else body[:140]
+        transaction.on_commit(lambda: notify_user(account, subject, body, {"kind": "account_enforcement", "notification_category": "account_security", "appeal_url": email_url or None, "template_parameter": security_parameter[:500]}, f"account-enforcement:{account.pk}:{action_value}:{timezone.now().timestamp()}"))
+        return Response(self.get_serializer(account).data)
+
+    @action(detail=True, methods=["post"], url_path="verification-badge")
+    @transaction.atomic
+    def verification_badge(self, request, pk=None):
+        account = User.objects.select_for_update().get(pk=pk)
+        if account.role != User.Role.STUDENT:
+            raise ValidationError({"status": "Verification badges can only be managed for student accounts."})
+        status_value = request.data.get("status")
+        if status_value not in ("student", "alumni", "revoked"):
+            raise ValidationError({"status": "Choose student, alumni, or revoked."})
+        note = str(request.data.get("note", "")).strip()
+        if status_value == "revoked" and len(note) < 3:
+            raise ValidationError({"note": "Add a short reason for revoking the verification badge."})
+
+        if status_value == "revoked":
+            account.is_student_verified = False
+            account.verified_affiliation = None
+            account.student_status_override = None
+            action_name = "student_verification_revoked"
+            message = "Your student verification badge has been revoked by Tarmac administrators. Contact support if you believe this is an error."
+        else:
+            account.is_student_verified = True
+            account.verified_affiliation = status_value
+            account.student_status_override = status_value
+            action_name = f"student_verification_badge_set_{status_value}"
+            message = f"Your Tarmac verification badge was updated to {status_value}. Contact support if you have questions."
+        account.save(update_fields=("is_student_verified", "verified_affiliation", "student_status_override"))
+        AdminLog.objects.create(actor=request.user, action=action_name, target_type="User", target_id=str(account.pk), metadata={"status": status_value, "note": note})
+        notify_user(account, "Tarmac verification badge updated", message, {"kind": "verification_badge_updated", "status": status_value}, f"verification-badge:{account.pk}:{status_value}:{timezone.now().timestamp()}")
+        return Response(self.get_serializer(account).data)
 
 
 class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
@@ -293,8 +400,8 @@ class AdminConversationViewSet(viewsets.GenericViewSet):
     permission_classes = [permissions.IsAdminUser]
     http_method_names = ["get", "patch", "post", "head", "options"]
     def get_queryset(self):
-        latest_messages = Message.objects.select_related("sender").prefetch_related("attachments").order_by("-created_at")[:50]
-        return Conversation.objects.annotate(unread_count=Count("messages", filter=models.Q(messages__sender__is_staff=False, messages__read_at__isnull=True))).prefetch_related("participants", Prefetch("messages", queryset=latest_messages, to_attr="recent_messages")).order_by("-updated_at")
+        latest_messages = Message.objects.select_related("sender", "conversation").prefetch_related("attachments", "conversation__participant_snapshots").order_by("-created_at")[:50]
+        return Conversation.objects.annotate(unread_count=Count("messages", filter=models.Q(messages__sender__is_staff=False, messages__read_at__isnull=True))).prefetch_related("participants", "participant_snapshots", Prefetch("messages", queryset=latest_messages, to_attr="recent_messages")).order_by("-updated_at")
     def list(self, request):
         queryset = self.get_queryset()
         page = self.paginate_queryset(queryset)
@@ -336,7 +443,9 @@ class AdminConversationViewSet(viewsets.GenericViewSet):
         conversation.completed_by.clear()
         conversation.save(update_fields=("is_official", "status", "completed_at", "updated_at"))
         for student in conversation.participants.filter(is_staff=False):
-            notify_user(student, "New message from Tarmac administration", body[:240], {"kind":"admin_conversation_reply", "conversation_id":conversation.pk}, f"admin-conversation-reply:{message.pk}:{student.pk}")
+            category = {Conversation.ContextType.OFFICIAL_SUPPORT: "support", Conversation.ContextType.OFFICIAL_PROMO: "promotional", Conversation.ContextType.OFFICIAL_ALERT: "lost_found"}.get(conversation.context_type, "official")
+            whatsapp_kind = {"support": "support_reply", "promotional": "promotion", "lost_found": "lost_found_match", "official": "official_message"}[category]
+            notify_user(student, "New message from Tarmac administration", body[:240], {"kind":"admin_conversation_reply", "whatsapp_template_kind": whatsapp_kind, "template_parameter": body[:140], "notification_category": category, "conversation_id":conversation.pk}, f"admin-conversation-reply:{message.pk}:{student.pk}")
         AdminLog.objects.create(actor=request.user, action="conversation_admin_reply", target_type="Conversation", target_id=str(conversation.pk), metadata={"message_id":message.pk})
         conversation = self.get_queryset().get(pk=conversation.pk)
         return Response(AdminConversationSerializer(conversation, context={"request": request}).data, status=status.HTTP_201_CREATED)
@@ -409,6 +518,15 @@ def send_admin_message(request):
     email = str(request.data.get("email", "")).strip().lower()
     subject = str(request.data.get("subject", "")).strip()
     body = str(request.data.get("body", "")).strip()
+    message_type = str(request.data.get("message_type", "official")).strip()
+    message_types = {
+        "official": (Conversation.ContextType.OFFICIAL, "official"),
+        "support": (Conversation.ContextType.OFFICIAL_SUPPORT, "support"),
+        "promotion": (Conversation.ContextType.OFFICIAL_PROMO, "promotional"),
+    }
+    if message_type not in message_types:
+        raise ValidationError({"message_type": "Choose official, support, or promotion."})
+    context_type, notification_group = message_types[message_type]
     uploads = request.FILES.getlist("attachment_files")
     if not email or not subject or (not body and not uploads):
         raise ValidationError({"detail": "Student email and title are required, with a message or attachment."})
@@ -418,10 +536,10 @@ def send_admin_message(request):
     if not is_student_feature_eligible(user):
         raise ValidationError({"email": "No active eligible student account was found with this email."})
     conversation = Conversation.objects.annotate(participant_count=Count("participants", distinct=True)).filter(
-        context_type=Conversation.ContextType.OFFICIAL, is_official=True, participant_count=2, participants=request.user
+        context_type=context_type, is_official=True, participant_count=2, participants=request.user
     ).filter(participants=user).first()
     if conversation is None:
-        conversation = Conversation.objects.create(context_type=Conversation.ContextType.OFFICIAL, context_title=subject[:180], is_official=True)
+        conversation = Conversation.objects.create(context_type=context_type, context_title=subject[:180], is_official=True)
         conversation.participants.add(request.user, user)
     serializer = MessageSerializer(data={"conversation": conversation.pk, "body": f"{subject}\n\n{body}".strip(), "attachment_files": uploads}, context={"request": request})
     serializer.is_valid(raise_exception=True)
@@ -429,8 +547,9 @@ def send_admin_message(request):
     conversation.is_official = True
     conversation.context_title = subject[:180]
     conversation.save(update_fields=("is_official", "context_title", "updated_at"))
-    notify_user(user, "Official message from Tarmac", body[:240] or subject, {"kind": "admin_conversation_reply", "conversation_id": conversation.pk, "is_official": True}, f"admin-message:{message.pk}:{user.pk}")
-    AdminLog.objects.create(actor=request.user, action="student_message_sent", target_type="User", target_id=str(user.pk), metadata={"email": user.email})
+    whatsapp_kind = {"support": "support_reply", "promotional": "promotion", "official": "official_message"}[notification_group]
+    notify_user(user, "Official message from Tarmac", body[:240] or subject, {"kind": "admin_conversation_reply", "whatsapp_template_kind": whatsapp_kind, "template_parameter": body[:140] or subject[:140], "notification_category": notification_group, "conversation_id": conversation.pk, "is_official": True}, f"admin-message:{message.pk}:{user.pk}")
+    AdminLog.objects.create(actor=request.user, action="student_message_sent", target_type="User", target_id=str(user.pk), metadata={"email": user.email, "message_type": message_type})
     return Response({"sent": True, "student": user.email, "conversation_id": conversation.pk}, status=status.HTTP_201_CREATED)
 
 from rest_framework.permissions import AllowAny
@@ -452,6 +571,8 @@ def system_status(request):
         "features": {
             "marketplace": config.marketplace_enabled,
             "lost_found": config.lost_found_enabled,
+            "jobs": config.jobs_enabled,
+            "external_job_submissions": config.external_job_submissions_enabled,
             "messaging": config.messaging_enabled,
             "ads": config.ads_enabled,
             "ad_slide_duration_seconds": config.ad_slide_duration_seconds,
@@ -675,7 +796,9 @@ class AdminItemMatchViewSet(viewsets.ModelViewSet):
         if match.is_reviewed and not match.is_dismissed:
             match = ItemMatch.objects.select_related("lost_report__reporter", "found_report__reporter").get(pk=match.pk)
             for owner, title in ((match.lost_report.reporter, match.lost_report.title), (match.found_report.reporter, match.found_report.title)):
-                notify_user(owner, "A possible lost-and-found match was confirmed", f'An administrator confirmed a possible match for "{title}". Open Lost & Found to contact the other student.', {"kind":"lost_found_match", "match_id":match.pk,"report_title":title}, f"admin-confirmed-match:{match.pk}:{owner.pk}")
+                from apps.notifications.services import send_official_match_message
+                conversation = send_official_match_message(match, owner, title, confirmed=True)
+                notify_user(owner, "A possible lost-and-found match was confirmed", f'An administrator confirmed a possible match for "{title}". Open the official Tarmac message to review it.', {"kind":"lost_found_match", "match_id":match.pk,"report_title":title,"conversation_id":conversation.pk if conversation else None,"link":f"/messages?conversation={conversation.pk}" if conversation else "/lost-found","notification_category":"lost_found"}, f"admin-confirmed-match:{match.pk}:{owner.pk}")
 
 class AdminProductViewSet(viewsets.ModelViewSet):
     serializer_class = AdminProductSerializer
