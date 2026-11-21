@@ -7,6 +7,8 @@ from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_elig
 from apps.administration.permissions import PlatformFeatureEnabled
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Count, Exists, IntegerField, OuterRef, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 import mimetypes
@@ -18,7 +20,16 @@ class ConversationViewSet(viewsets.ModelViewSet):
     platform_feature = "messaging_enabled"
     serializer_class=ConversationSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     def get_queryset(self):
-        queryset = Conversation.objects.filter(participants=self.request.user).prefetch_related("participants", "participant_snapshots")
+        latest_message = Message.objects.filter(conversation_id=OuterRef("pk")).order_by("-created_at", "-pk")
+        unread_messages = Message.objects.filter(conversation_id=OuterRef("pk"), read_at__isnull=True).exclude(sender=self.request.user).values("conversation_id").annotate(total=Count("pk")).values("total")[:1]
+        completed_by_me = Conversation.completed_by.through.objects.filter(conversation_id=OuterRef("pk"), user_id=self.request.user.pk)
+        queryset = Conversation.objects.filter(participants=self.request.user).prefetch_related("participants", "participant_snapshots").annotate(
+            inbox_last_message_preview=Subquery(latest_message.values("body")[:1]),
+            inbox_last_message_at=Subquery(latest_message.values("created_at")[:1]),
+            inbox_unread_count=Coalesce(Subquery(unread_messages, output_field=IntegerField()), Value(0), output_field=IntegerField()),
+            inbox_completion_count=Count("completed_by", distinct=True),
+            inbox_completed_by_me=Exists(completed_by_me),
+        ).order_by("-updated_at", "-pk")
         identity_type = self.request.query_params.get("identity_type")
         if identity_type in ("normal", "anonymous"):
             queryset = queryset.filter(participant_snapshots__user=self.request.user, participant_snapshots__identity_type=identity_type)
@@ -237,7 +248,7 @@ class MessageViewSet(viewsets.ModelViewSet):
     platform_feature = "messaging_enabled"
     serializer_class=MessageSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     def get_queryset(self):
-        queryset = Message.objects.filter(conversation__participants=self.request.user)
+        queryset = Message.objects.filter(conversation__participants=self.request.user).select_related("sender", "conversation").prefetch_related("attachments").order_by("-created_at", "-pk")
         conversation_id = self.request.query_params.get("conversation")
         return queryset.filter(conversation_id=conversation_id) if conversation_id else queryset
     def perform_create(self,serializer):

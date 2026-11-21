@@ -23,7 +23,10 @@ class ConversationSerializer(serializers.ModelSerializer):
     participants_data = serializers.SerializerMethodField()
     completed_by_me = serializers.SerializerMethodField()
     completion_count = serializers.SerializerMethodField()
-    class Meta: model=Conversation; fields=("id","participants","participants_data","status","context_type","context_id","context_title","is_official","completed_by_me","completion_count","completed_at","created_at","updated_at"); read_only_fields=("status","is_official","completed_by_me","completion_count","completed_at","created_at","updated_at")
+    last_message_preview = serializers.SerializerMethodField()
+    last_message_at = serializers.SerializerMethodField()
+    unread_count = serializers.IntegerField(source="inbox_unread_count", read_only=True, default=0)
+    class Meta: model=Conversation; fields=("id","participants","participants_data","status","context_type","context_id","context_title","is_official","completed_by_me","completion_count","completed_at","created_at","updated_at","last_message_preview","last_message_at","unread_count"); read_only_fields=("status","is_official","completed_by_me","completion_count","completed_at","created_at","updated_at","last_message_preview","last_message_at","unread_count")
 
     def get_participants_data(self, obj):
         request = self.context.get("request")
@@ -39,10 +42,26 @@ class ConversationSerializer(serializers.ModelSerializer):
 
     def get_completed_by_me(self, obj):
         request = self.context.get("request")
+        if hasattr(obj, "inbox_completed_by_me"):
+            return obj.inbox_completed_by_me
         return bool(request and obj.completed_by.filter(pk=request.user.pk).exists())
 
     def get_completion_count(self, obj):
+        if hasattr(obj, "inbox_completion_count"):
+            return obj.inbox_completion_count
         return obj.completed_by.count()
+
+    def get_last_message_preview(self, obj):
+        if hasattr(obj, "inbox_last_message_preview"):
+            return (obj.inbox_last_message_preview or "")[:240]
+        message = obj.messages.order_by("-created_at", "-pk").only("body").first()
+        return message.body[:240] if message else ""
+
+    def get_last_message_at(self, obj):
+        if hasattr(obj, "inbox_last_message_at"):
+            return obj.inbox_last_message_at
+        message = obj.messages.order_by("-created_at", "-pk").only("created_at").first()
+        return message.created_at if message else None
 
     def validate(self, attrs):
         if self.instance and "participants" in attrs:
