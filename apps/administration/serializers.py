@@ -219,6 +219,13 @@ class AdminAccountSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"entry_year": "Enter a valid year of entry."})
         return attrs
 
+
+class AdminAdministratorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ("id", "email", "username", "first_name", "last_name", "role", "is_staff", "is_superuser", "is_active", "date_joined", "last_login")
+        read_only_fields = fields
+
 class AdminConversationMessageSerializer(serializers.ModelSerializer):
     sender_name = serializers.SerializerMethodField()
     marketplace_identity_name = serializers.SerializerMethodField()

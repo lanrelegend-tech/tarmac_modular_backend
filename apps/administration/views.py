@@ -30,7 +30,7 @@ from apps.ads.models import AdCampaign
 from apps.messaging.models import Conversation, Message
 from apps.messaging.serializers import MessageSerializer
 from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
-from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
+from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminAdministratorSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
 from apps.notifications.services import notify_user
 class UserReportViewSet(viewsets.ModelViewSet):
@@ -726,6 +726,63 @@ class IsSuperUser(permissions.BasePermission):
     message = "Only a superuser can change platform-wide settings."
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+
+class AdminAdministratorViewSet(viewsets.GenericViewSet):
+    serializer_class = AdminAdministratorSerializer
+    permission_classes = [IsSuperUser]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        return User.objects.filter(is_staff=True).order_by("-is_superuser", "email")
+
+    def list(self, request):
+        return Response(self.get_serializer(self.get_queryset(), many=True).data)
+
+    @transaction.atomic
+    def create(self, request):
+        email = str(request.data.get("email", "")).strip()
+        if not email:
+            raise ValidationError({"email": "Enter the email address of an existing, verified account."})
+        account = User.objects.select_for_update().filter(email__iexact=email).first()
+        if not account:
+            raise ValidationError({"email": "No account exists with that email. The person must register and verify their email first."})
+        if account.is_staff or account.is_superuser:
+            raise ValidationError({"email": "This account already has administrator access."})
+        if not account.is_active or account.is_suspended:
+            raise ValidationError({"email": "Inactive or suspended accounts cannot become administrators."})
+        if not account.email_verified:
+            raise ValidationError({"email": "The account must verify its email before administrator access can be granted."})
+
+        account.is_staff = True
+        account.role = User.Role.ADMIN
+        account.save(update_fields=("is_staff", "role"))
+        AdminLog.objects.create(actor=request.user, action="administrator_access_granted", target_type="User", target_id=str(account.pk))
+        event_key = f"administrator-access:{account.pk}:granted:{request.user.pk}:{timezone.now().timestamp()}"
+        transaction.on_commit(lambda: notify_user(account, "Tarmac administrator access granted", "A Tarmac superuser granted administrator access to your account. Contact Tarmac Support immediately if you did not expect this change.", {"kind": "account_enforcement", "notification_category": "account_security"}, event_key))
+        return Response(self.get_serializer(account).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="revoke")
+    @transaction.atomic
+    def revoke(self, request, pk=None):
+        account = get_object_or_404(User.objects.select_for_update(), pk=pk)
+        if not account.is_staff:
+            raise ValidationError({"detail": "This account no longer has administrator access."})
+        if account.is_superuser:
+            raise ValidationError({"detail": "Superuser access cannot be revoked from this screen."})
+        if account.pk == request.user.pk:
+            raise ValidationError({"detail": "You cannot revoke your own administrator access."})
+
+        account.is_staff = False
+        account.role = User.Role.STUDENT
+        account.save(update_fields=("is_staff", "role"))
+        for outstanding in OutstandingToken.objects.filter(user=account):
+            BlacklistedToken.objects.get_or_create(token=outstanding)
+        AdminLog.objects.create(actor=request.user, action="administrator_access_revoked", target_type="User", target_id=str(account.pk))
+        event_key = f"administrator-access:{account.pk}:revoked:{request.user.pk}:{timezone.now().timestamp()}"
+        transaction.on_commit(lambda: notify_user(account, "Tarmac administrator access revoked", "A Tarmac superuser removed administrator access from your account. Your account remains active with its existing student permissions.", {"kind": "account_enforcement", "notification_category": "account_security"}, event_key))
+        return Response(self.get_serializer(account).data)
+
 
 class PlatformSettingsView(generics.RetrieveUpdateAPIView):
     serializer_class = PlatformSettingsSerializer
