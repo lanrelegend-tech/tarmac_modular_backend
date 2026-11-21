@@ -69,11 +69,10 @@ class StudentPublicProfileSerializer(serializers.ModelSerializer):
 
 
 class AnonymousMarketplaceIdentitySerializer(serializers.ModelSerializer):
-    handle = serializers.CharField(required=False, max_length=32)
     class Meta:
         model = AnonymousMarketplaceIdentity
         fields = ("public_id", "handle", "is_enabled", "created_at")
-        read_only_fields = ("public_id", "created_at")
+        read_only_fields = ("public_id", "handle", "created_at")
     def create(self, validated_data):
         import secrets
         user = self.context["request"].user
@@ -88,17 +87,13 @@ class AnonymousMarketplaceIdentitySerializer(serializers.ModelSerializer):
                 return AnonymousMarketplaceIdentity.objects.create(user=user, handle=handle, **validated_data)
         raise serializers.ValidationError("Could not create a unique marketplace identity. Try again.")
 
-    def validate_handle(self, value):
-        value = value.strip()
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,31}", value):
-            raise serializers.ValidationError("Use 3 to 32 letters, numbers, or underscores, starting with a letter.")
-        return value
 class RegisterSerializer(serializers.ModelSerializer):
     password=serializers.CharField(write_only=True, min_length=8)
     matric_number=serializers.CharField(required=True, max_length=40)
+    phone_number=serializers.CharField(required=True, max_length=25)
     course=serializers.PrimaryKeyRelatedField(queryset=CourseProgram.objects.filter(is_active=True), required=True)
     entry_year=serializers.IntegerField(required=True, min_value=2000)
-    class Meta: model=User; fields=("id","username","first_name","last_name","email","matric_number","password","department","faculty","level","course","entry_year")
+    class Meta: model=User; fields=("id","username","first_name","last_name","email","matric_number","phone_number","password","department","faculty","level","course","entry_year")
     def validate_email(self, value):
         value = value.strip().lower()
         if User.objects.filter(email__iexact=value).exists():
@@ -115,6 +110,11 @@ class RegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Enter your matriculation number.")
         if User.objects.filter(matric_number__iexact=value).exists() or StudentVerification.objects.filter(submitted_matric_number__iexact=value).exists():
             raise serializers.ValidationError("This matriculation number is already linked to an account. Sign in or contact the school administrator.")
+        return value
+    def validate_phone_number(self, value):
+        value = value.strip()
+        if sum(character.isdigit() for character in value) < 7:
+            raise serializers.ValidationError("Enter a valid phone number with at least 7 digits.")
         return value
     def validate_password(self, value):
         validate_password(value)
