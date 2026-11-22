@@ -135,7 +135,7 @@ def paystack_webhook(request):
             notify_user(payment.user, "Listing payment received", f"Your listing '{payment.product.title}' is " + ("awaiting school review." if platform.listing_approval_required else "now active."),
                         {"kind": "listing_review", "notification_category": "payments", "product_id": payment.product_id, "title": payment.product.title}, f"listing-review:{payment.product_id}")
         elif payment.advertisement_id and payment.advertisement.status == AdCampaign.Status.PENDING_PAYMENT:
-            campaign = AdCampaign.objects.select_for_update().select_related("business_advertiser", "ad_placement").prefetch_related("ad_placements").get(pk=payment.advertisement_id)
+            campaign = AdCampaign.objects.select_for_update(of=("self",)).select_related("business_advertiser", "ad_placement").prefetch_related("ad_placements").get(pk=payment.advertisement_id)
             from apps.ads.models import AdPlacement, AdSlotHold
             from apps.ads.services import get_slot_availability
             placements = list(campaign.ad_placements.order_by("pk")) or ([campaign.ad_placement] if campaign.ad_placement_id else [])

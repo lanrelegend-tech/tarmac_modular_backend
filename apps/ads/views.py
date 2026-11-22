@@ -448,10 +448,10 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         token = str(request.data.get("token", "")).strip()
         campaign_id = request.data.get("campaign")
         token_hash = _token_hash(token)
-        campaign = AdCampaign.objects.select_for_update().select_related("ad_placement", "business_advertiser").filter(pk=campaign_id, management_token_hash=token_hash).first()
+        campaign = AdCampaign.objects.select_for_update(of=("self",)).select_related("ad_placement", "business_advertiser").filter(pk=campaign_id, management_token_hash=token_hash).first()
         if campaign is None:
             advertiser = get_object_or_404(AdAdvertiser, management_token_hash=token_hash)
-            campaign = get_object_or_404(AdCampaign.objects.select_for_update().select_related("ad_placement"), pk=campaign_id, business_advertiser=advertiser)
+            campaign = get_object_or_404(AdCampaign.objects.select_for_update(of=("self",)).select_related("ad_placement"), pk=campaign_id, business_advertiser=advertiser)
         if campaign.status in (AdCampaign.Status.ENDED, AdCampaign.Status.CANCELLED, AdCampaign.Status.REJECTED):
             raise ValidationError({"status": "This campaign is already closed."})
         if campaign.payments.filter(status="success").exists():
@@ -538,7 +538,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=("post",), permission_classes=(IsAdminOrAbove,))
     @transaction.atomic
     def approve(self, request, pk=None):
-        campaign = get_object_or_404(AdCampaign.objects.select_for_update().select_related("business_advertiser", "ad_placement", "package", "advertiser"), pk=pk)
+        campaign = get_object_or_404(AdCampaign.objects.select_for_update(of=("self",)).select_related("business_advertiser", "ad_placement", "package", "advertiser"), pk=pk)
         platform = PlatformSettings.get_solo()
         from apps.payments.models import Payment
         payment_required = platform.ad_fee_enabled and platform.paystack_enabled and campaign.price_kobo > 0
@@ -605,7 +605,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=("post",), permission_classes=(IsAdminOrAbove,))
     @transaction.atomic
     def reject(self, request, pk=None):
-        campaign = AdCampaign.objects.select_for_update().select_related("business_advertiser", "advertiser").get(pk=pk)
+        campaign = AdCampaign.objects.select_for_update(of=("self",)).select_related("business_advertiser", "advertiser").get(pk=pk)
         if campaign.status == AdCampaign.Status.ACTIVE:
             raise ValidationError({"status": "Pause an active campaign before rejecting it."})
         if campaign.status in (AdCampaign.Status.REJECTED, AdCampaign.Status.CANCELLED, AdCampaign.Status.ENDED):

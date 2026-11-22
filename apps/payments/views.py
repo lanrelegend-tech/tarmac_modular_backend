@@ -103,12 +103,12 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         except (TypeError, ValueError):
             raise ValidationError({"campaign": "Provide a valid campaign ID."})
         token_hash = hashlib.sha256(token.encode()).hexdigest() if token else ""
-        campaign = AdCampaign.objects.select_for_update().select_related("business_advertiser", "package", "ad_placement").filter(pk=campaign_id, business_advertiser__isnull=False, management_token_hash=token_hash).first()
+        campaign = AdCampaign.objects.select_for_update(of=("self",)).select_related("business_advertiser", "package", "ad_placement").filter(pk=campaign_id, business_advertiser__isnull=False, management_token_hash=token_hash).first()
         if campaign is None:
             advertiser = AdAdvertiser.objects.filter(management_token_hash=token_hash).first() if token_hash else None
             if not advertiser:
                 raise PermissionDenied("This private campaign link is invalid or expired.")
-            campaign = AdCampaign.objects.select_for_update().select_related("business_advertiser", "package", "ad_placement").filter(pk=campaign_id, business_advertiser=advertiser).first()
+            campaign = AdCampaign.objects.select_for_update(of=("self",)).select_related("business_advertiser", "package", "ad_placement").filter(pk=campaign_id, business_advertiser=advertiser).first()
         if not campaign:
             raise PermissionDenied("This private campaign link does not grant access to this campaign.")
         if campaign.status != AdCampaign.Status.PENDING_PAYMENT:
