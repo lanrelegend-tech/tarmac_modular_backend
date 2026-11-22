@@ -387,6 +387,8 @@ class SupportTicketSerializer(serializers.ModelSerializer):
         model = SupportTicket
         fields = ("id", "user", "user_name", "subject", "category", "status", "priority", "messages", "initial_message", "attachment_files", "created_at", "updated_at")
         read_only_fields = ("id", "user", "user_name", "status", "messages", "created_at", "updated_at")
+    def get_user_name(self, obj):
+        return obj.user.get_full_name().strip() or obj.user.username
     def get_fields(self):
         fields = super().get_fields()
         if self.context.get("request") and self.context["request"].user.is_staff:

@@ -37,6 +37,10 @@ from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSer
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
 from apps.notifications.services import notify_user, dispatch_notification
 from apps.notifications.models import Notification
+import logging
+
+logger = logging.getLogger(__name__)
+
 class UserReportViewSet(viewsets.ModelViewSet):
     serializer_class=UserReportSerializer
     http_method_names = ["get", "post", "patch", "head", "options"]
@@ -736,7 +740,16 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         ticket = serializer.save(user=self.request.user)
         from apps.notifications.services import notify_user
         for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=self.request.user.pk).iterator():
-            notify_user(administrator, "New student support request", ticket.subject, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"support-ticket:{ticket.pk}:{administrator.pk}")
+            try:
+                notify_user(administrator, "New student support request", ticket.subject, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"support-ticket:{ticket.pk}:{administrator.pk}")
+            except Exception:
+                # A notification provider/cache failure must not make a saved
+                # support request appear to fail to the student.
+                logger.exception(
+                    "Could not notify administrator %s about support ticket %s",
+                    administrator.pk,
+                    ticket.pk,
+                )
 
     def perform_update(self, serializer):
         previous_status = serializer.instance.status
