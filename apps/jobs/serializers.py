@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from apps.accounts.models import User
 from apps.messaging.models import Conversation
+from apps.administration.campuses import validate_campus_choice
 from .models import JobCategory, JobEngagement, JobListing, JobReport
 
 
@@ -14,6 +15,7 @@ class JobCategorySerializer(serializers.ModelSerializer):
 
 
 class JobListingSerializer(serializers.ModelSerializer):
+    campus = serializers.CharField(required=True, max_length=120)
     category_name = serializers.CharField(source="category.name", read_only=True)
     poster_name = serializers.SerializerMethodField()
     poster_status = serializers.SerializerMethodField()
@@ -26,7 +28,7 @@ class JobListingSerializer(serializers.ModelSerializer):
         model = JobListing
         fields = (
             "id", "source", "kind", "service_intent", "engagement", "category", "category_name", "title",
-            "description", "requirements", "pay_type", "pay_min", "pay_max", "location",
+            "description", "requirements", "pay_type", "pay_min", "pay_max", "location", "campus",
             "working_hours", "duration", "positions", "deadline", "application_instructions",
             "application_url", "business_name", "identity_type", "poster_public_id", "poster_name", "poster_status",
             "is_owner", "is_sponsored", "status", "admin_note", "created_at", "updated_at", "closed_at",
@@ -71,6 +73,9 @@ class JobListingSerializer(serializers.ModelSerializer):
         if value and not value.lower().startswith("https://"):
             raise serializers.ValidationError("Application links must use HTTPS.")
         return value
+
+    def validate_campus(self, value):
+        return validate_campus_choice(value)
 
     def validate_deadline(self, value):
         today = timezone.localdate()
@@ -139,6 +144,7 @@ class JobEngagementSerializer(serializers.ModelSerializer):
 
 
 class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
+    campus = serializers.CharField(required=True, max_length=120)
     business_name = serializers.CharField(max_length=180)
     business_contact_name = serializers.CharField(max_length=120)
     business_email = serializers.EmailField()
@@ -150,7 +156,7 @@ class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
         model = JobListing
         fields = (
             "kind", "service_intent", "engagement", "category", "title", "description", "requirements", "pay_type",
-            "pay_min", "pay_max", "location", "working_hours", "duration", "positions", "deadline",
+            "pay_min", "pay_max", "location", "campus", "working_hours", "duration", "positions", "deadline",
             "application_instructions", "application_url", "business_name", "business_contact_name",
             "business_email", "business_phone", "business_website", "business_description",
         )
@@ -159,6 +165,9 @@ class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
         if not value.is_active:
             raise serializers.ValidationError("Choose an active category.")
         return value
+
+    def validate_campus(self, value):
+        return validate_campus_choice(value)
 
     def validate_application_url(self, value):
         if value and not value.lower().startswith("https://"):
@@ -217,7 +226,7 @@ class AdminJobListingSerializer(serializers.ModelSerializer):
         model = JobListing
         fields = (
             "id", "source", "owner", "owner_email", "identity_type", "anonymous_identity", "anonymous_identity_name", "kind", "service_intent", "engagement", "category", "category_name",
-            "title", "description", "requirements", "pay_type", "pay_min", "pay_max", "location",
+            "title", "description", "requirements", "pay_type", "pay_min", "pay_max", "location", "campus",
             "working_hours", "duration", "positions", "deadline", "application_instructions", "application_url",
             "business_name", "business_contact_name", "business_email", "business_phone", "business_website",
             "business_description", "business_email_verified_at", "status", "admin_note", "reviewed_by",

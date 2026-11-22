@@ -24,6 +24,10 @@ def default_notification_channels():
     }
 
 
+def default_campuses():
+    return []
+
+
 def report_evidence_upload_to(instance, filename):
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
     return f"report_evidence/{uuid4().hex}.{extension}"
@@ -69,6 +73,7 @@ class PlatformSettings(models.Model):
     tagline = models.CharField(max_length=240, default="The marketplace built for students.")
     support_email = models.EmailField(blank=True)
     contact_email = models.EmailField(blank=True)
+    campuses = models.JSONField(default=default_campuses, blank=True)
     registration_enabled = models.BooleanField(default=True)
     listing_approval_required = models.BooleanField(default=True)
     max_product_images = models.PositiveSmallIntegerField(default=5)
@@ -168,6 +173,7 @@ Marketplace listings, reviews and messages are visible to the people who use tho
 
 class EmergencyContact(models.Model):
     """Public emergency numbers curated by Tarmac administrators."""
+    campus = models.CharField(max_length=120, blank=True, default="", db_index=True)
     name = models.CharField(max_length=120)
     phone_number = models.CharField(max_length=40)
     description = models.CharField(max_length=240, blank=True)

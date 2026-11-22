@@ -6,6 +6,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from .models import User, StudentVerification, AccountActionToken, ProfileChangeRequest, ProfileChangeMessage, CourseProgram, AnonymousMarketplaceIdentity
 from .utils import username_change_available_at
+from apps.administration.campuses import validate_campus_choice
 
 
 def normalize_whatsapp_number(value):
@@ -137,10 +138,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Enter a valid phone number with at least 7 digits.")
         return value
     def validate_campus(self, value):
-        value = value.strip()
-        if not value:
-            raise serializers.ValidationError("Enter the campus where you study.")
-        return value
+        return validate_campus_choice(value)
     def validate_password(self, value):
         validate_password(value)
         return value
@@ -166,6 +164,9 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ("username", "first_name", "last_name", "department", "faculty", "level", "campus", "bio", "phone_number", "whatsapp_number", "profile_picture", "notification_email_enabled", "notification_whatsapp_enabled", "public_name_enabled", "public_department_enabled", "public_level_enabled", "public_profile_enabled", "public_profile_picture_enabled")
+
+    def validate_campus(self, value):
+        return validate_campus_choice(value)
 
     def validate_profile_picture(self, image):
         if image and image.size > 5 * 1024 * 1024:

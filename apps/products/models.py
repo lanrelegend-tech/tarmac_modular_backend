@@ -16,7 +16,7 @@ class Product(models.Model):
     identity_type=models.CharField(max_length=12,choices=IdentityType.choices,default=IdentityType.NORMAL)
     anonymous_identity=models.ForeignKey("accounts.AnonymousMarketplaceIdentity",null=True,blank=True,on_delete=models.SET_NULL,related_name="products")
     show_on_profile=models.BooleanField(default=False)
-    title=models.CharField(max_length=160); description=models.TextField(); condition=models.CharField(max_length=20,choices=Condition.choices)
+    campus=models.CharField(max_length=120, db_index=True, blank=True); title=models.CharField(max_length=160); description=models.TextField(); condition=models.CharField(max_length=20,choices=Condition.choices)
     price=models.DecimalField(max_digits=12,decimal_places=2,validators=[MinValueValidator(0.01)]); negotiable=models.BooleanField(default=False); location=models.CharField(max_length=160)
     status=models.CharField(max_length=24,choices=Status.choices,default=Status.PENDING_PAYMENT); expires_at=models.DateTimeField(null=True,blank=True); is_featured=models.BooleanField(default=False); featured_until=models.DateTimeField(null=True,blank=True)
     sponsor_requested=models.BooleanField(default=False); sponsorship_fee_kobo=models.PositiveIntegerField(default=0); sponsorship_duration_days=models.PositiveSmallIntegerField(default=7); featured_position=models.PositiveIntegerField(null=True,blank=True)

@@ -32,6 +32,7 @@ class AccommodationListing(models.Model):
         FILLED = "filled", "No longer available"
 
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="accommodation_listings")
+    campus = models.CharField(max_length=120, db_index=True, blank=True)
     post_type = models.CharField(max_length=12, choices=PostType.choices, db_index=True)
     accommodation_type = models.CharField(max_length=24, choices=AccommodationType.choices, default=AccommodationType.ANY)
     title = models.CharField(max_length=160)

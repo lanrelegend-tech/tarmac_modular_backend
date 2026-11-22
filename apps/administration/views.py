@@ -139,7 +139,7 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
         announcement.save(update_fields=("pinned",))
         AdminLog.objects.create(actor=request.user, action="announcement_pinned" if announcement.pinned else "announcement_unpinned", target_type="Announcement", target_id=str(announcement.pk), metadata={})
         return Response({"pinned": announcement.pinned})
-class AdminLogViewSet(viewsets.ReadOnlyModelViewSet): queryset=AdminLog.objects.all(); serializer_class=AdminLogSerializer; permission_classes=[IsAdminOrAbove]
+class AdminLogViewSet(viewsets.ReadOnlyModelViewSet): queryset=AdminLog.objects.select_related("actor").all(); serializer_class=AdminLogSerializer; permission_classes=[IsAdminOrAbove]
 
 @api_view(["GET"])
 @drf_permission_classes([permissions.IsAuthenticated])
@@ -665,6 +665,7 @@ def system_status(request):
             "support_email": config.support_email,
             "contact_email": config.contact_email,
         },
+        "campuses": config.campuses or [],
         "maintenance_mode": config.maintenance_mode,
         "maintenance_message": config.maintenance_message if config.maintenance_mode else "",
         "features": {
@@ -961,8 +962,11 @@ class PublicEmergencyContactListView(generics.ListAPIView):
     authentication_classes = []
 
     def get_queryset(self):
-        return EmergencyContact.objects.filter(is_active=True).only(
-            "id", "name", "phone_number", "description", "location", "sort_order", "is_active", "updated_at"
+        campus = self.request.query_params.get("campus", "").strip()[:120]
+        if not campus:
+            return EmergencyContact.objects.none()
+        return EmergencyContact.objects.filter(is_active=True, campus__iexact=campus).only(
+            "id", "campus", "name", "phone_number", "description", "location", "sort_order", "is_active", "updated_at"
         )
 
 

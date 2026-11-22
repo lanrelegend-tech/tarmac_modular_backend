@@ -21,7 +21,10 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
     serializer_class=LostFoundReportSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     search_fields = ["title", "description", "location", "colour", "identifying_details"]
     filterset_fields = ["report_type", "category", "status"]
-    def get_queryset(self): return LostFoundReport.objects.filter(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
+    def get_queryset(self):
+        queryset = LostFoundReport.objects.filter(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
+        campus = self.request.query_params.get("campus")
+        return queryset.filter(campus__iexact=campus.strip()[:120]) if campus else queryset
     def perform_create(self,serializer):
         report=serializer.save(reporter=self.request.user); create_possible_matches(report)
     def perform_update(self,serializer):

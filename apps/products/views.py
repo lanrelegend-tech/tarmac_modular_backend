@@ -80,11 +80,17 @@ class ProductViewSet(viewsets.ModelViewSet):
             if not platform.sponsored_products_enabled or not platform.featured_products_enabled:
                 return Product.objects.none()
             available = available.filter(is_featured=True).filter(Q(featured_until__isnull=True) | Q(featured_until__gt=timezone.now()))
+            campus = self.request.query_params.get("campus")
+            if campus:
+                available = available.filter(campus__iexact=campus.strip()[:120])
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
         if self.action == "list" and self.request.query_params.get("featured") == "true":
             if not platform.featured_products_enabled or not platform.sponsored_products_enabled:
                 return Product.objects.none()
             available = available.filter(is_featured=True).filter(Q(featured_until__isnull=True) | Q(featured_until__gt=timezone.now()))
+            campus = self.request.query_params.get("campus")
+            if campus:
+                available = available.filter(campus__iexact=campus.strip()[:120])
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
         if self.action in ("list","retrieve"):
             own_products = qs.filter(seller=self.request.user) if self.request.user.is_authenticated else qs.none()
@@ -94,7 +100,11 @@ class ProductViewSet(viewsets.ModelViewSet):
                 if not ids:
                     return qs.none()
                 return (available | invite_only | own_products).filter(pk__in=ids).distinct()
-            return (available | invite_only | own_products).distinct()
+            queryset = (available | invite_only | own_products).distinct()
+            campus = self.request.query_params.get("campus")
+            if campus:
+                queryset = queryset.filter(campus__iexact=campus.strip()[:120])
+            return queryset
         if not self.request.user.is_authenticated:
             return qs.none()
         return qs.filter(seller=self.request.user)

@@ -5,6 +5,7 @@ from apps.accounts.models import StudentVerification, User, AnonymousMarketplace
 from apps.reviews.models import ReviewReport, SellerReview
 from .models import UserReport,ReportEvidence,Announcement,AdminLog,SupportTicket,SupportMessage,SupportAttachment,PlatformSettings,SubscriptionPlan,StudentSubscription,EmergencyContact,default_notification_channels
 from apps.ads.models import AdPlacement
+from .campuses import clean_campus_list, validate_campus_choice
 class UserReportSerializer(serializers.ModelSerializer):
     evidence_images = serializers.ListField(child=serializers.ImageField(), write_only=True, required=False, max_length=5)
     evidence = serializers.SerializerMethodField()
@@ -136,7 +137,14 @@ class AnnouncementSerializer(serializers.ModelSerializer):
     def get_created_by_name(self, obj):
         return obj.created_by.get_full_name().strip() or obj.created_by.username
 class AdminLogSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+
     class Meta: model=AdminLog; fields="__all__"
+
+    def get_actor_name(self, obj):
+        if not obj.actor_id:
+            return "System"
+        return obj.actor.get_full_name().strip() or obj.actor.username
 
 class AdminVerificationSerializer(serializers.ModelSerializer):
     student_id_image_url = serializers.SerializerMethodField()
@@ -437,8 +445,10 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
     whatsapp_phone_number_id = serializers.CharField(required=False, allow_blank=True, max_length=80)
     class Meta:
         model = PlatformSettings
-        fields = ("site_name", "site_logo", "site_logo_url", "tagline", "support_email", "contact_email", "maintenance_mode", "maintenance_message", "marketplace_enabled", "lost_found_enabled", "jobs_enabled", "accommodation_enabled", "accommodation_listing_duration_days", "external_job_submissions_enabled", "job_listing_approval_required", "messaging_enabled", "ads_enabled", "homepage_ads_enabled", "marketplace_ads_enabled", "homepage_lost_found_enabled", "ad_slide_duration_seconds", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "sponsored_products_enabled", "sponsored_product_fee_enabled", "sponsored_product_fee_kobo", "sponsored_product_duration_days", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled", "registration_enabled", "listing_approval_required", "max_product_images", "student_verification_enabled", "require_student_id", "email_verification_required", "auto_approve_students", "featured_products_enabled", "reviews_enabled", "review_moderation_enabled", "announcements_enabled", "email_notifications_enabled", "notification_channels", "whatsapp_phone_number_id", "report_notifications_enabled", "terms_text", "privacy_text", "community_guidelines_text", "updated_at")
+        fields = ("site_name", "site_logo", "site_logo_url", "tagline", "support_email", "contact_email", "campuses", "maintenance_mode", "maintenance_message", "marketplace_enabled", "lost_found_enabled", "jobs_enabled", "accommodation_enabled", "accommodation_listing_duration_days", "external_job_submissions_enabled", "job_listing_approval_required", "messaging_enabled", "ads_enabled", "homepage_ads_enabled", "marketplace_ads_enabled", "homepage_lost_found_enabled", "ad_slide_duration_seconds", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "sponsored_products_enabled", "sponsored_product_fee_enabled", "sponsored_product_fee_kobo", "sponsored_product_duration_days", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled", "registration_enabled", "listing_approval_required", "max_product_images", "student_verification_enabled", "require_student_id", "email_verification_required", "auto_approve_students", "featured_products_enabled", "reviews_enabled", "review_moderation_enabled", "announcements_enabled", "email_notifications_enabled", "notification_channels", "whatsapp_phone_number_id", "report_notifications_enabled", "terms_text", "privacy_text", "community_guidelines_text", "updated_at")
         read_only_fields = ("updated_at",)
+    def validate_campuses(self, value):
+        return clean_campus_list(value)
     def get_site_logo_url(self, obj):
         if not obj.site_logo: return ""
         request = self.context.get("request")
@@ -471,10 +481,15 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
 
 
 class EmergencyContactSerializer(serializers.ModelSerializer):
+    campus = serializers.CharField(required=True, max_length=120)
+
     class Meta:
         model = EmergencyContact
-        fields = ("id", "name", "phone_number", "description", "location", "sort_order", "is_active", "updated_at")
+        fields = ("id", "campus", "name", "phone_number", "description", "location", "sort_order", "is_active", "updated_at")
         read_only_fields = ("id", "updated_at")
+
+    def validate_campus(self, value):
+        return validate_campus_choice(value)
 
     def validate_phone_number(self, value):
         value = value.strip()
@@ -520,8 +535,8 @@ class AdminLostFoundSerializer(serializers.ModelSerializer):
     class Meta:
         from apps.lost_found.models import LostFoundReport
         model = LostFoundReport
-        fields = ("id", "reporter_id", "report_type", "title", "description", "category", "category_name", "colour", "location", "incident_date", "image_url", "status", "is_active", "created_at")
-        read_only_fields = ("id", "reporter_id", "report_type", "title", "description", "category", "category_name", "colour", "location", "incident_date", "image_url", "created_at")
+        fields = ("id", "reporter_id", "report_type", "title", "description", "category", "category_name", "colour", "location", "campus", "incident_date", "image_url", "status", "is_active", "created_at")
+        read_only_fields = ("id", "reporter_id", "report_type", "title", "description", "category", "category_name", "colour", "location", "campus", "incident_date", "image_url", "created_at")
     def get_image_url(self, obj):
         if not obj.image: return None
         request = self.context.get("request")
@@ -558,8 +573,8 @@ class AdminProductSerializer(serializers.ModelSerializer):
     class Meta:
         from apps.products.models import Product
         model = Product
-        fields = ("id", "seller_id", "seller_name", "seller_email", "category", "category_name", "title", "description", "condition", "price", "location", "status", "is_featured", "featured_until", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "image_url", "created_at")
-        read_only_fields = ("id", "seller_id", "seller_name", "seller_email", "category", "category_name", "title", "description", "condition", "price", "location", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "image_url", "created_at")
+        fields = ("id", "seller_id", "seller_name", "seller_email", "category", "category_name", "title", "description", "condition", "price", "location", "campus", "status", "is_featured", "featured_until", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "image_url", "created_at")
+        read_only_fields = ("id", "seller_id", "seller_name", "seller_email", "category", "category_name", "title", "description", "condition", "price", "location", "campus", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "image_url", "created_at")
     def get_image_url(self, obj):
         if not obj.images.exists(): return None
         request = self.context.get("request")

@@ -114,6 +114,7 @@ class JobListingViewSet(viewsets.ModelViewSet):
         engagement = self.request.query_params.get("engagement")
         service_intent = self.request.query_params.get("service_intent")
         location = self.request.query_params.get("location")
+        campus = self.request.query_params.get("campus")
         pay_min = self.request.query_params.get("pay_min")
         pay_max = self.request.query_params.get("pay_max")
         if kind in JobListing.Kind.values:
@@ -126,6 +127,8 @@ class JobListingViewSet(viewsets.ModelViewSet):
             qs = qs.filter(engagement=engagement)
         if location:
             qs = qs.filter(location__icontains=location[:100])
+        if campus:
+            qs = qs.filter(campus__iexact=campus.strip()[:120])
         try:
             if pay_min:
                 qs = qs.filter(Q(pay_max__gte=float(pay_min)) | Q(pay_max__isnull=True))

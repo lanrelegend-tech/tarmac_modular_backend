@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from apps.administration.campuses import validate_campus_choice
 
 from .models import AccommodationImage, AccommodationListing, HostelAgentRequest
 
@@ -10,6 +11,7 @@ class AccommodationImageSerializer(serializers.ModelSerializer):
 
 
 class AccommodationListingSerializer(serializers.ModelSerializer):
+    campus = serializers.CharField(required=True, max_length=120)
     images = serializers.ListField(child=serializers.ImageField(), write_only=True, required=False)
     photos = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
@@ -19,7 +21,7 @@ class AccommodationListingSerializer(serializers.ModelSerializer):
     class Meta:
         model = AccommodationListing
         fields = (
-            "id", "post_type", "accommodation_type", "title", "description", "location_area",
+            "id", "post_type", "accommodation_type", "title", "description", "location_area", "campus",
             "rent_amount", "budget_min", "budget_max", "rent_period", "agency_fee", "caution_fee",
             "service_fee", "other_fees", "other_fees_note", "water_available", "electricity_available",
             "road_access", "security_available", "bathroom_available", "kitchen_available", "furnished",
@@ -38,6 +40,9 @@ class AccommodationListingSerializer(serializers.ModelSerializer):
 
     def get_poster_label(self, obj):
         return "Verified KWASU student"
+
+    def validate_campus(self, value):
+        return validate_campus_choice(value)
 
     def validate_images(self, images):
         if len(images) > 8:

@@ -1,14 +1,17 @@
 from rest_framework import serializers
 from .models import LostFoundReport,ItemMatch,ItemClaim
 from django.utils import timezone
+from apps.administration.campuses import validate_campus_choice
 class LostFoundReportSerializer(serializers.ModelSerializer):
+    campus = serializers.CharField(required=True, max_length=120)
     image = serializers.ImageField(write_only=True, required=False, allow_null=True)
     identifying_details = serializers.CharField(write_only=True, required=False, allow_blank=True)
     contact_details = serializers.CharField(write_only=True, required=False, allow_blank=True)
     category_name = serializers.CharField(source="category.name", read_only=True)
     image_url = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
-    class Meta: model=LostFoundReport; fields=("id","report_type","title","description","category","category_name","colour","location","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner"); read_only_fields=("status","created_at","is_owner")
+    class Meta: model=LostFoundReport; fields=("id","report_type","title","description","category","category_name","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner"); read_only_fields=("status","created_at","is_owner")
+    def validate_campus(self, value): return validate_campus_choice(value)
     def get_is_owner(self, obj):
         request = self.context.get("request")
         return bool(request and request.user.is_authenticated and obj.reporter_id == request.user.pk)

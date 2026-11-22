@@ -29,6 +29,9 @@ class AccommodationListingViewSet(viewsets.ModelViewSet):
         queryset = AccommodationListing.objects.select_related("owner").prefetch_related("images")
         if self.request.query_params.get("mine") == "true":
             return queryset.filter(owner=self.request.user).exclude(status=AccommodationListing.Status.REMOVED)
+        campus = self.request.query_params.get("campus")
+        if campus:
+            queryset = queryset.filter(campus__iexact=campus.strip()[:120])
         platform = PlatformSettings.get_solo()
         eligible_owner = Q(owner__is_active=True, owner__is_suspended=False, owner__deleted_at__isnull=True)
         if platform.student_verification_enabled:

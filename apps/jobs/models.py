@@ -63,6 +63,7 @@ class JobListing(models.Model):
     service_intent = models.CharField(max_length=8, choices=ServiceIntent.choices, default=ServiceIntent.OFFER, db_index=True)
     engagement = models.CharField(max_length=16, choices=Engagement.choices, default=Engagement.PART_TIME)
     category = models.ForeignKey(JobCategory, on_delete=models.PROTECT, related_name="listings")
+    campus = models.CharField(max_length=120, db_index=True, blank=True)
     title = models.CharField(max_length=180)
     description = models.TextField(max_length=8000)
     requirements = models.TextField(max_length=4000, blank=True)

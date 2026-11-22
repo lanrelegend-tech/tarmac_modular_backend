@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from apps.administration.models import PlatformSettings
+from apps.administration.campuses import validate_campus_choice
 from .models import Category, Product, ProductImage, Favourite, ProductAudienceGrant
 class CategorySerializer(serializers.ModelSerializer):
     products_count = serializers.IntegerField(read_only=True, default=0)
@@ -68,6 +69,7 @@ class ProductImageUploadSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"product": "This listing has reached the image limit set by the school."})
         return attrs
 class ProductSerializer(serializers.ModelSerializer):
+    campus = serializers.CharField(required=True, max_length=120)
     is_featured = serializers.SerializerMethodField()
     sponsor_listing = serializers.BooleanField(write_only=True, required=False, default=False)
     images = ProductImageSerializer(many=True, read_only=True)
@@ -87,7 +89,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ("id", "seller_public_id", "seller_identity_type", "seller_profile_visible", "is_owner", "seller_verified", "seller_name", "seller_campus", "seller_department", "seller_level", "seller_course", "seller_status", "category", "category_name", "title", "description", "condition", "price", "negotiable", "location", "visibility", "identity_type", "show_on_profile", "audience_public_ids", "status", "expires_at", "is_featured", "featured_until", "sponsor_listing", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "images", "created_at", "updated_at")
+        fields = ("id", "seller_public_id", "seller_identity_type", "seller_profile_visible", "is_owner", "seller_verified", "seller_name", "seller_campus", "campus", "seller_department", "seller_level", "seller_course", "seller_status", "category", "category_name", "title", "description", "condition", "price", "negotiable", "location", "visibility", "identity_type", "show_on_profile", "audience_public_ids", "status", "expires_at", "is_featured", "featured_until", "sponsor_listing", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "images", "created_at", "updated_at")
         read_only_fields = ("status", "expires_at", "is_featured", "featured_until", "created_at", "updated_at")
 
     def get_seller_name(self, obj):
@@ -117,6 +119,8 @@ class ProductSerializer(serializers.ModelSerializer):
         return obj.seller.course.name if obj.seller.course_id else None
     def get_seller_status(self, obj):
         return obj.seller.student_status if obj.seller.is_student_verified else "pending"
+    def validate_campus(self, value):
+        return validate_campus_choice(value)
     def get_is_featured(self, obj):
         from django.utils import timezone
         from apps.administration.models import PlatformSettings
