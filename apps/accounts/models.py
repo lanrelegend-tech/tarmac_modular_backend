@@ -38,6 +38,7 @@ class User(AbstractUser):
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT)
     is_student_verified = models.BooleanField(default=False); is_suspended = models.BooleanField(default=False)
+    is_hostel_agent = models.BooleanField(default=False, db_index=True)
     email_verified = models.BooleanField(default=False)
     notification_email_enabled = models.BooleanField(default=True); notification_whatsapp_enabled = models.BooleanField(default=False)
     whatsapp_consent_at = models.DateTimeField(null=True, blank=True)

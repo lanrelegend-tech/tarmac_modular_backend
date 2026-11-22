@@ -13,6 +13,7 @@ from .models import LostFoundReport,ItemMatch,ItemMatchReview,ItemClaim
 from .serializers import LostFoundReportSerializer,ItemMatchSerializer,ItemClaimSerializer
 from .services import create_possible_matches
 from apps.notifications.services import notify_user
+from config.storage import optimized_image_response
 from apps.messaging.models import Conversation, BlockedUser
 from apps.messaging.serializers import ConversationSerializer
 class LostFoundReportViewSet(viewsets.ModelViewSet):
@@ -37,8 +38,7 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
         if not report.image:
             from rest_framework.exceptions import NotFound
             raise NotFound("This report has no image.")
-        content_type = mimetypes.guess_type(report.image.name)[0] or "application/octet-stream"
-        return FileResponse(report.image.open("rb"), content_type=content_type)
+        return optimized_image_response(report.image)
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
         report = self.get_object()

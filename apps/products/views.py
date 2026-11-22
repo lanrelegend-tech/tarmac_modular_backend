@@ -1,20 +1,19 @@
-import mimetypes
 from datetime import timedelta
 from django.db.models import F, Q
 from django.db.models import Count
 from rest_framework.exceptions import ValidationError
-from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import viewsets, permissions
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
+from config.storage import optimized_image_response
 from apps.administration.models import PlatformSettings, AdminLog
 from apps.administration.permissions import IsAdminOrAbove, PlatformFeatureEnabled
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from .models import Category, Product, ProductImage, Favourite
-from .serializers import CategorySerializer, ProductSerializer, ProductImageUploadSerializer, FavouriteSerializer
+from .serializers import CategorySerializer, ProductSerializer, ProductOwnerListSerializer, ProductImageUploadSerializer, FavouriteSerializer
 from .permissions import VerifiedStudentOrReadOnly
 
 class CategoryViewSet(viewsets.ModelViewSet):
@@ -55,6 +54,11 @@ class ProductViewSet(viewsets.ModelViewSet):
     platform_feature = "marketplace_enabled"
     pagination_class = ProductPagination
     serializer_class=ProductSerializer; permission_classes=[VerifiedStudentOrReadOnly, PlatformFeatureEnabled]; filterset_fields=["category","condition","status"]; search_fields=["title","description","location"]; ordering_fields=["price","created_at"]
+    def get_serializer_class(self):
+        if self.action == "list" and self.request.query_params.get("mine") == "true":
+            return ProductOwnerListSerializer
+        return super().get_serializer_class()
+
     def get_queryset(self):
         qs=Product.objects.select_related("seller","seller__course","category","anonymous_identity").prefetch_related("images")
         platform = PlatformSettings.get_solo()
@@ -68,6 +72,10 @@ class ProductViewSet(viewsets.ModelViewSet):
         invite_only = qs.none()
         if self.request.user.is_authenticated:
             invite_only = qs.filter(status=Product.Status.ACTIVE, visibility=Product.Visibility.INVITE_ONLY, audience_grants__user=self.request.user, seller__is_active=True, seller__is_suspended=False, category__is_active=True, category__is_allowed_for_sale=True).filter(valid_identity, seller_access).filter(Q(expires_at__isnull=True)|Q(expires_at__gt=timezone.now()))
+        if self.action == "list" and self.request.query_params.get("mine") == "true":
+            if not self.request.user.is_authenticated:
+                return qs.none()
+            return qs.filter(seller=self.request.user).distinct()
         if self.action == "list" and self.request.query_params.get("sponsored") == "true":
             if not platform.sponsored_products_enabled or not platform.featured_products_enabled:
                 return Product.objects.none()
@@ -80,6 +88,12 @@ class ProductViewSet(viewsets.ModelViewSet):
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
         if self.action in ("list","retrieve"):
             own_products = qs.filter(seller=self.request.user) if self.request.user.is_authenticated else qs.none()
+            requested_ids = self.request.query_params.get("ids")
+            if self.action == "list" and requested_ids:
+                ids = [int(value) for value in requested_ids.split(",")[:100] if value.isdigit()]
+                if not ids:
+                    return qs.none()
+                return (available | invite_only | own_products).filter(pk__in=ids).distinct()
             return (available | invite_only | own_products).distinct()
         if not self.request.user.is_authenticated:
             return qs.none()
@@ -146,8 +160,7 @@ class ProductImageViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], url_path="file")
     def file(self, request, pk=None):
         item = self.get_object()
-        content_type = mimetypes.guess_type(item.image.name)[0] or "application/octet-stream"
-        return FileResponse(item.image.open("rb"), content_type=content_type)
+        return optimized_image_response(item.image)
     def perform_create(self, serializer):
         product = serializer.validated_data["product"]
         if product.seller_id != self.request.user.id:

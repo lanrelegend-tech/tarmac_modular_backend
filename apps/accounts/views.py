@@ -1,10 +1,9 @@
-import mimetypes
 import logging
 import hashlib
 from datetime import timedelta
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.http import FileResponse
+from config.storage import optimized_image_response
 from django.shortcuts import get_object_or_404
 from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib.auth import get_user_model
@@ -325,8 +324,7 @@ def profile_change_request_image(request, request_id):
     if not change_request.requested_profile_picture:
         from rest_framework.exceptions import NotFound
         raise NotFound("No profile picture was included in this request.")
-    content_type = mimetypes.guess_type(change_request.requested_profile_picture.name)[0] or "application/octet-stream"
-    return FileResponse(change_request.requested_profile_picture.open("rb"), content_type=content_type)
+    return optimized_image_response(change_request.requested_profile_picture)
 
 @staff_member_required
 def student_id_image(request, verification_id):
@@ -334,8 +332,7 @@ def student_id_image(request, verification_id):
     if not verification.student_id_image:
         from django.http import Http404
         raise Http404("This verification image has been deleted.")
-    content_type = mimetypes.guess_type(verification.student_id_image.name)[0] or "application/octet-stream"
-    return FileResponse(verification.student_id_image.open("rb"), content_type=content_type)
+    return optimized_image_response(verification.student_id_image)
 
 @api_view(["GET"])
 @permission_classes([permissions.IsAuthenticated])
@@ -349,8 +346,9 @@ def profile_image(request, user_id):
     if not target.profile_picture:
         from rest_framework.exceptions import NotFound
         raise NotFound("No profile picture has been uploaded.")
-    content_type = mimetypes.guess_type(target.profile_picture.name)[0] or "application/octet-stream"
-    return FileResponse(target.profile_picture.open("rb"), content_type=content_type)
+    # This URL is access-controlled above. Keep a short browser cache to avoid
+    # downloading the same avatar from Cloudinary on every page visit.
+    return optimized_image_response(target.profile_picture, cache_seconds=300)
 
 @api_view(["POST"])
 @throttle_classes([AccountActionThrottle])

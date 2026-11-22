@@ -1,10 +1,8 @@
-import mimetypes
 import hashlib
 import secrets
 import os
 from datetime import datetime, timedelta
 
-from django.http import FileResponse
 from django.db.models import F, Q, CharField, Value
 from django.db import transaction
 from django.db.models.functions import Cast
@@ -19,6 +17,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
+from config.storage import optimized_image_response
 from apps.administration.models import PlatformSettings
 from apps.administration.permissions import IsAdminOrAbove, PlatformFeatureEnabled
 from .models import AdAdvertiser, AdCampaign, AdImpression, AdPlacement, AdSlotHold, AdWaitlistEntry
@@ -685,8 +684,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=("get",), url_path="image")
     def image_file(self, request, pk=None):
         campaign = self.get_object()
-        content_type = mimetypes.guess_type(campaign.image.name)[0] or "application/octet-stream"
-        return FileResponse(campaign.image.open("rb"), content_type=content_type)
+        return optimized_image_response(campaign.image)
 
     @action(detail=True, methods=("get",), url_path="click")
     def click(self, request, pk=None):

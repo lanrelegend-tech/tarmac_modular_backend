@@ -6,6 +6,7 @@ checks have passed.
 """
 
 from io import BytesIO
+import mimetypes
 from pathlib import Path
 from time import time
 from uuid import uuid4
@@ -17,8 +18,38 @@ from cloudinary.utils import private_download_url
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
+from django.http import FileResponse
 from django.utils.deconstruct import deconstructible
 from PIL import Image, ImageOps, UnidentifiedImageError
+
+
+def optimized_image_response(image_field, cache_seconds=600):
+    """Stream a compressed image and let each signed-in browser reuse it briefly."""
+    content_type = "image/webp" if getattr(image_field.storage, "cloudinary_enabled", False) else mimetypes.guess_type(image_field.name)[0]
+    response = FileResponse(
+        image_field.open("rb"),
+        content_type=content_type or "image/webp",
+    )
+    response["Cache-Control"] = f"private, max-age={cache_seconds}, stale-while-revalidate=60"
+    response["Vary"] = "Cookie"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def optimize_uploaded_image(content, max_size=(1600, 1600), quality=78):
+    """Normalize an uploaded raster image to a small, orientation-correct WebP."""
+    content.seek(0)
+    try:
+        with Image.open(content) as source:
+            image = ImageOps.exif_transpose(source)
+            image.thumbnail(max_size, Image.Resampling.LANCZOS)
+            has_alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
+            image = image.convert("RGBA" if has_alpha else "RGB")
+            output = BytesIO()
+            image.save(output, format="WEBP", quality=quality, method=5)
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as error:
+        raise ValueError("Upload a valid image file.") from error
+    return ContentFile(output.getvalue(), name=f"{uuid4().hex}.webp")
 
 
 @deconstructible
@@ -36,23 +67,26 @@ class CloudinaryImageStorage(FileSystemStorage):
         return bool(getattr(settings, "CLOUDINARY_URL", ""))
 
     def _optimized_image(self, content, name):
-        content.seek(0)
-        try:
-            with Image.open(content) as source:
-                image = ImageOps.exif_transpose(source)
-                image.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
-                has_alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
-                image = image.convert("RGBA" if has_alpha else "RGB")
-                output = BytesIO()
-                image.save(output, format="WEBP", quality=80, method=6)
-        except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as error:
-            raise ValueError("Upload a valid image file.") from error
-
+        folders = {part.lower() for part in Path(name.replace("\\", "/")).parts}
+        # Profile photos appear throughout the app as small avatars, so
+        # storing a 2K original for them only wastes transfer and storage.
+        if "profiles" in folders or "profile_change_requests" in folders:
+            max_size, quality = (512, 512), 76
+        elif "site" in folders:
+            max_size, quality = (960, 960), 80
+        elif "reviews" in folders or "lost_found" in folders:
+            max_size, quality = (1200, 1200), 77
+        elif "student_ids" in folders or "report_evidence" in folders:
+            # Keep text and submitted evidence legible for admin review.
+            max_size, quality = (1920, 1920), 84
+        else:
+            max_size, quality = (1600, 1600), 78
+        optimized = optimize_uploaded_image(content, max_size=max_size, quality=quality)
         folder = Path(name.replace("\\", "/")).parent.as_posix()
         if folder == ".":
             folder = "images"
         public_id = f"tarmac/{folder}/{uuid4().hex}"
-        return public_id, ContentFile(output.getvalue(), name=f"{uuid4().hex}.webp")
+        return public_id, optimized
 
     def _save(self, name, content):
         public_id, optimized = self._optimized_image(content, name)
@@ -87,7 +121,22 @@ class CloudinaryImageStorage(FileSystemStorage):
                 type="authenticated",
                 expires_at=int(time()) + 300,
             )
-        return cloudinary.CloudinaryImage(asset_id).build_url(secure=True, format="webp")
+        folders = {part.lower() for part in Path(asset_id).parts}
+        width = 512 if "profiles" in folders or "profile_change_requests" in folders else 1000 if "products" in folders or "reviews" in folders or "lost_found" in folders else 1200
+        return self.optimized_url(asset_id, width=width)
+
+    def optimized_url(self, name, width=1200, height=None, crop="limit"):
+        """Return a CDN-transformed URL sized for browser display, not the original."""
+        asset_id = self._private_asset(name) or name
+        if self.private:
+            return self.url(name)
+        transformations = [{"width": width, "crop": crop}]
+        if height:
+            transformations[0]["height"] = height
+        transformations.append({"quality": "auto:good"})
+        return cloudinary.CloudinaryImage(asset_id).build_url(
+            secure=True, format="webp", transformation=transformations
+        )
 
     def _open(self, name, mode="rb"):
         if self.cloudinary_enabled and (not self.private or self._private_asset(name)):

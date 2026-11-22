@@ -20,6 +20,7 @@ def default_notification_channels():
         "account_security": {"email": True, "whatsapp": False},
         "marketplace": {"email": True, "whatsapp": False},
         "payments": {"email": True, "whatsapp": False},
+        "accommodation": {"email": True, "whatsapp": False},
     }
 
 
@@ -100,6 +101,8 @@ Marketplace listings, reviews and messages are visible to the people who use tho
     marketplace_enabled = models.BooleanField(default=True)
     lost_found_enabled = models.BooleanField(default=True)
     jobs_enabled = models.BooleanField(default=True)
+    accommodation_enabled = models.BooleanField(default=True)
+    accommodation_listing_duration_days = models.PositiveSmallIntegerField(default=60)
     external_job_submissions_enabled = models.BooleanField(default=True)
     job_listing_approval_required = models.BooleanField(default=True)
     messaging_enabled = models.BooleanField(default=True)
@@ -126,12 +129,12 @@ Marketplace listings, reviews and messages are visible to the people who use tho
     def save(self, *args, **kwargs):
         self.pk = 1
         super().save(*args, **kwargs)
-        cache.delete("tarmac.platform_settings")
+        cache.delete("tarmac.platform_settings.v2")
 
     @classmethod
     def get_solo(cls):
         try:
-            settings_obj = cache.get("tarmac.platform_settings")
+            settings_obj = cache.get("tarmac.platform_settings.v2")
         except Exception:
             # Settings are authoritative in the database. Keep API requests
             # working when the optional shared cache is temporarily unavailable.
@@ -143,7 +146,7 @@ Marketplace listings, reviews and messages are visible to the people who use tho
             # Admin saves explicitly invalidate this key; a longer fallback TTL
             # avoids repeatedly loading settings from the external cache/database.
             try:
-                cache.set("tarmac.platform_settings", settings_obj, 300)
+                cache.set("tarmac.platform_settings.v2", settings_obj, 300)
             except Exception:
                 logger.exception("Could not cache platform settings; continuing with the database value.")
         return settings_obj
@@ -161,6 +164,25 @@ Marketplace listings, reviews and messages are visible to the people who use tho
             raise ValidationError("Advertisement slide duration must be between 5 seconds and 24 hours.")
         if not 1 <= self.sponsored_product_duration_days <= 366:
             raise ValidationError("Sponsored product duration must be between 1 and 366 days.")
+
+
+class EmergencyContact(models.Model):
+    """Public emergency numbers curated by Tarmac administrators."""
+    name = models.CharField(max_length=120)
+    phone_number = models.CharField(max_length=40)
+    description = models.CharField(max_length=240, blank=True)
+    location = models.CharField(max_length=120, blank=True)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("sort_order", "name", "id")
+        indexes = [models.Index(fields=("is_active", "sort_order"), name="emergency_active_order_idx")]
+
+    def __str__(self):
+        return f"{self.name}: {self.phone_number}"
 
 
 class SupportTicket(models.Model):

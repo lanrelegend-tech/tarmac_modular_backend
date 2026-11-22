@@ -218,7 +218,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def complete(self, request, pk=None):
         conversation = Conversation.objects.select_for_update().get(pk=self.get_object().pk)
-        if conversation.context_type not in (Conversation.ContextType.GENERAL, Conversation.ContextType.MARKETPLACE, Conversation.ContextType.LOST_FOUND, Conversation.ContextType.JOBS):
+        if conversation.context_type not in (Conversation.ContextType.GENERAL, Conversation.ContextType.MARKETPLACE, Conversation.ContextType.LOST_FOUND, Conversation.ContextType.JOBS, Conversation.ContextType.ACCOMMODATION):
             raise ValidationError({"detail": "Only student conversations can be completed here."})
         participants = list(conversation.participants.filter(is_staff=False))
         if request.user not in participants or len(participants) != 2:
@@ -240,8 +240,11 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 match = ItemMatch.objects.select_for_update().filter(pk=conversation.context_id, is_dismissed=False).select_related("lost_report", "found_report").first()
                 if match and {match.lost_report.reporter_id, match.found_report.reporter_id} == {person.pk for person in participants}:
                     LostFoundReport.objects.filter(pk__in=(match.lost_report_id, match.found_report_id)).update(status=LostFoundReport.Status.RETURNED, is_active=False)
+            elif conversation.context_type == Conversation.ContextType.ACCOMMODATION:
+                from apps.accommodation.models import AccommodationListing
+                AccommodationListing.objects.filter(pk=conversation.context_id, status=AccommodationListing.Status.ACTIVE).update(status=AccommodationListing.Status.FILLED, updated_at=completion_event_at)
             subject = "Tarmac: completion confirmed"
-            context_name = {Conversation.ContextType.MARKETPLACE: "marketplace transaction", Conversation.ContextType.LOST_FOUND: "lost-and-found return"}.get(conversation.context_type, "student conversation")
+            context_name = {Conversation.ContextType.MARKETPLACE: "marketplace transaction", Conversation.ContextType.LOST_FOUND: "lost-and-found return", Conversation.ContextType.ACCOMMODATION: "accommodation arrangement"}.get(conversation.context_type, "student conversation")
             body = f"Both students confirmed this {context_name} as complete."
             for person in participants:
                 notify_user(person, subject, body, {"kind": "conversation_completed", "conversation_id": conversation.pk, "context_type": conversation.context_type}, f"conversation-completed:{conversation.pk}:{completion_event_at.timestamp()}:{person.pk}")
@@ -296,4 +299,8 @@ def message_attachment_file(request, attachment_id):
     if not request.user.is_staff and not attachment.message.conversation.participants.filter(pk=request.user.pk).exists():
         raise PermissionDenied("You are not a participant in this conversation.")
     content_type = attachment.content_type or mimetypes.guess_type(attachment.file.name)[0] or "application/octet-stream"
-    return FileResponse(attachment.file.open("rb"), content_type=content_type)
+    response = FileResponse(attachment.file.open("rb"), content_type=content_type)
+    response["Cache-Control"] = "private, max-age=600"
+    response["Vary"] = "Cookie"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response

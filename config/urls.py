@@ -15,7 +15,7 @@ from apps.accounts.authentication import (
     SchoolTokenRefreshSerializer,
 )
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
-from apps.administration.views import system_status, system_logo
+from apps.administration.views import system_status, system_logo, PublicEmergencyContactListView
 
 
 class TarmacAdminSite(AdminSite):
@@ -113,6 +113,7 @@ class SchoolTokenLogoutView(APIView):
 urlpatterns = [
  path("api/system/status/", system_status, name="system-status"),
  path("api/system/logo/", system_logo, name="system-logo"),
+ path("api/emergency-contacts/", PublicEmergencyContactListView.as_view(), name="public-emergency-contacts"),
  path("admin/", admin.site.urls), path("api/auth/csrf/", CsrfTokenView.as_view(), name="csrf-token"),
  path("api/auth/token/", SchoolTokenObtainPairView.as_view(), name="token_obtain_pair"),
  path("api/auth/token/refresh/", SchoolTokenRefreshView.as_view(), name="token_refresh"),
@@ -124,5 +125,6 @@ urlpatterns = [
  path("api/lost-found/", include("apps.lost_found.urls")), path("api/messaging/", include("apps.messaging.urls")),
  path("api/notifications/", include("apps.notifications.urls")), path("api/admin-tools/", include("apps.administration.urls")),
  path("api/reviews/", include("apps.reviews.urls")),
+ path("api/accommodation/", include("apps.accommodation.urls")),
 ]
 if settings.DEBUG: urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

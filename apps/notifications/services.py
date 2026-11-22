@@ -116,6 +116,8 @@ def notification_category(kind):
         return "account_security"
     if kind.startswith(("lost_found", "item_claim")):
         return "lost_found"
+    if kind.startswith("accommodation"):
+        return "accommodation"
     if kind.startswith("support"):
         return "support"
     if kind in ("admin_conversation_reply", "official_message"):

@@ -177,5 +177,15 @@ class BlockedUserSerializer(serializers.ModelSerializer):
         uploads = validated_data.pop("attachment_files", [])
         message = Message.objects.create(**validated_data)
         for upload in uploads:
-            MessageAttachment.objects.create(message=message, file=upload, original_name=get_valid_filename(upload.name)[:255], content_type=upload.content_type)
+            original_name = get_valid_filename(upload.name)[:255]
+            if upload.content_type.startswith("image/"):
+                from config.storage import optimize_uploaded_image
+                try:
+                    optimized = optimize_uploaded_image(upload, max_size=(1440, 1440), quality=78)
+                except ValueError as error:
+                    raise serializers.ValidationError({"attachment_files": str(error)}) from error
+                optimized.name = f"{original_name.rsplit('.', 1)[0]}.webp"
+                MessageAttachment.objects.create(message=message, file=optimized, original_name=original_name, content_type="image/webp")
+            else:
+                MessageAttachment.objects.create(message=message, file=upload, original_name=original_name, content_type=upload.content_type)
         return message

@@ -26,6 +26,21 @@ class ProductImageSerializer(serializers.ModelSerializer):
         path = f"/api/products/images/{obj.pk}/file/"
         return request.build_absolute_uri(path) if request else path
 
+class ProductOwnerListSerializer(serializers.ModelSerializer):
+    primary_image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = ("id", "title", "price", "status", "primary_image")
+
+    def get_primary_image(self, obj):
+        images = list(obj.images.all())
+        if not images:
+            return ""
+        request = self.context.get("request")
+        path = f"/api/products/images/{images[0].pk}/file/"
+        return request.build_absolute_uri(path) if request else path
+
 class ProductImageUploadSerializer(serializers.ModelSerializer):
     image = serializers.ImageField(write_only=True)
     image_url = serializers.SerializerMethodField()
@@ -105,8 +120,11 @@ class ProductSerializer(serializers.ModelSerializer):
     def get_is_featured(self, obj):
         from django.utils import timezone
         from apps.administration.models import PlatformSettings
-        settings = PlatformSettings.get_solo()
-        return bool(settings.featured_products_enabled and settings.sponsored_products_enabled and obj.is_featured and (obj.featured_until is None or obj.featured_until > timezone.now()))
+        platform = self.context.get("_tarmac_product_platform_settings")
+        if platform is None:
+            platform = PlatformSettings.get_solo()
+            self.context["_tarmac_product_platform_settings"] = platform
+        return bool(platform.featured_products_enabled and platform.sponsored_products_enabled and obj.is_featured and (obj.featured_until is None or obj.featured_until > timezone.now()))
     def validate_category(self, category):
         if not category.is_active or not category.is_allowed_for_sale:
             raise serializers.ValidationError("This category is not currently available for listings.")

@@ -3,7 +3,7 @@ from rest_framework import serializers
 from django.utils import timezone
 from apps.accounts.models import StudentVerification, User, AnonymousMarketplaceIdentity
 from apps.reviews.models import ReviewReport, SellerReview
-from .models import UserReport,ReportEvidence,Announcement,AdminLog,SupportTicket,SupportMessage,SupportAttachment,PlatformSettings,SubscriptionPlan,StudentSubscription,default_notification_channels
+from .models import UserReport,ReportEvidence,Announcement,AdminLog,SupportTicket,SupportMessage,SupportAttachment,PlatformSettings,SubscriptionPlan,StudentSubscription,EmergencyContact,default_notification_channels
 from apps.ads.models import AdPlacement
 class UserReportSerializer(serializers.ModelSerializer):
     evidence_images = serializers.ListField(child=serializers.ImageField(), write_only=True, required=False, max_length=5)
@@ -242,8 +242,8 @@ class AdminAccountSerializer(serializers.ModelSerializer):
     anonymous_identity_enabled = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "student_status_override", "campus", "profile_picture_url", "anonymous_identity_handle", "anonymous_identity_public_id", "anonymous_identity_enabled", "role", "is_active", "is_suspended", "deleted_at", "is_student_verified", "email_verified", "date_joined")
-        read_only_fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course_name", "student_status", "student_status_override", "campus", "role", "is_active", "is_suspended", "deleted_at", "is_student_verified", "email_verified", "date_joined")
+        fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "student_status_override", "campus", "profile_picture_url", "anonymous_identity_handle", "anonymous_identity_public_id", "anonymous_identity_enabled", "role", "is_active", "is_suspended", "deleted_at", "is_student_verified", "is_hostel_agent", "email_verified", "date_joined")
+        read_only_fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course_name", "student_status", "student_status_override", "campus", "role", "is_active", "is_suspended", "deleted_at", "is_student_verified", "is_hostel_agent", "email_verified", "date_joined")
 
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
@@ -416,7 +416,19 @@ class SupportTicketSerializer(serializers.ModelSerializer):
             ticket = SupportTicket.objects.create(**validated_data)
             message = SupportMessage.objects.create(ticket=ticket, sender=self.context["request"].user, body=first_message)
             for upload in uploads:
-                SupportAttachment.objects.create(message=message, file=upload, original_name=get_valid_filename(upload.name)[:255], content_type=upload.content_type)
+                original_name = get_valid_filename(upload.name)[:255]
+                content_type = upload.content_type
+                if content_type.startswith("image/"):
+                    from config.storage import optimize_uploaded_image
+                    try:
+                        stored_file = optimize_uploaded_image(upload, max_size=(1440, 1440), quality=78)
+                    except ValueError as error:
+                        raise serializers.ValidationError({"attachment_files": str(error)}) from error
+                    stored_file.name = f"{original_name.rsplit('.', 1)[0]}.webp"
+                    content_type = "image/webp"
+                else:
+                    stored_file = upload
+                SupportAttachment.objects.create(message=message, file=stored_file, original_name=original_name, content_type=content_type)
         return ticket
 
 class PlatformSettingsSerializer(serializers.ModelSerializer):
@@ -425,7 +437,7 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
     whatsapp_phone_number_id = serializers.CharField(required=False, allow_blank=True, max_length=80)
     class Meta:
         model = PlatformSettings
-        fields = ("site_name", "site_logo", "site_logo_url", "tagline", "support_email", "contact_email", "maintenance_mode", "maintenance_message", "marketplace_enabled", "lost_found_enabled", "jobs_enabled", "external_job_submissions_enabled", "job_listing_approval_required", "messaging_enabled", "ads_enabled", "homepage_ads_enabled", "marketplace_ads_enabled", "homepage_lost_found_enabled", "ad_slide_duration_seconds", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "sponsored_products_enabled", "sponsored_product_fee_enabled", "sponsored_product_fee_kobo", "sponsored_product_duration_days", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled", "registration_enabled", "listing_approval_required", "max_product_images", "student_verification_enabled", "require_student_id", "email_verification_required", "auto_approve_students", "featured_products_enabled", "reviews_enabled", "review_moderation_enabled", "announcements_enabled", "email_notifications_enabled", "notification_channels", "whatsapp_phone_number_id", "report_notifications_enabled", "terms_text", "privacy_text", "community_guidelines_text", "updated_at")
+        fields = ("site_name", "site_logo", "site_logo_url", "tagline", "support_email", "contact_email", "maintenance_mode", "maintenance_message", "marketplace_enabled", "lost_found_enabled", "jobs_enabled", "accommodation_enabled", "accommodation_listing_duration_days", "external_job_submissions_enabled", "job_listing_approval_required", "messaging_enabled", "ads_enabled", "homepage_ads_enabled", "marketplace_ads_enabled", "homepage_lost_found_enabled", "ad_slide_duration_seconds", "paystack_enabled", "listing_fee_enabled", "listing_fee_kobo", "sponsored_products_enabled", "sponsored_product_fee_enabled", "sponsored_product_fee_kobo", "sponsored_product_duration_days", "ad_fee_enabled", "ad_fee_kobo", "subscription_fee_enabled", "registration_enabled", "listing_approval_required", "max_product_images", "student_verification_enabled", "require_student_id", "email_verification_required", "auto_approve_students", "featured_products_enabled", "reviews_enabled", "review_moderation_enabled", "announcements_enabled", "email_notifications_enabled", "notification_channels", "whatsapp_phone_number_id", "report_notifications_enabled", "terms_text", "privacy_text", "community_guidelines_text", "updated_at")
         read_only_fields = ("updated_at",)
     def get_site_logo_url(self, obj):
         if not obj.site_logo: return ""
@@ -452,8 +464,28 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Sponsored product duration must be between 1 and 366 days.")
         return value
 
+    def validate_accommodation_listing_duration_days(self, value):
+        if not 1 <= value <= 365:
+            raise serializers.ValidationError("Accommodation posts can remain active from 1 to 365 days.")
+        return value
+
+
+class EmergencyContactSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmergencyContact
+        fields = ("id", "name", "phone_number", "description", "location", "sort_order", "is_active", "updated_at")
+        read_only_fields = ("id", "updated_at")
+
+    def validate_phone_number(self, value):
+        value = value.strip()
+        if len(value) < 3 or not any(character.isdigit() for character in value):
+            raise serializers.ValidationError("Enter a phone number with at least one digit.")
+        if any(not (character.isdigit() or character in "+ -()") for character in value):
+            raise serializers.ValidationError("Use only digits, spaces, +, hyphens and parentheses.")
+        return value
+
     def validate_notification_channels(self, value):
-        allowed = {"lost_found", "support", "official", "promotional", "account_security", "marketplace", "payments"}
+        allowed = {"lost_found", "support", "official", "promotional", "account_security", "marketplace", "payments", "accommodation"}
         if not isinstance(value, dict) or set(value) - allowed:
             raise serializers.ValidationError("Choose valid notification categories.")
         for category, channels in value.items():

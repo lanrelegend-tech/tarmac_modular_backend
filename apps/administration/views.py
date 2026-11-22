@@ -4,7 +4,6 @@ import hashlib
 import os
 import secrets
 import uuid
-import mimetypes
 from urllib.parse import urlencode
 from django.db import transaction
 from django.http import FileResponse
@@ -29,14 +28,16 @@ from apps.payments.models import Payment
 from apps.lost_found.models import LostFoundReport, ItemMatch, ItemClaim
 from apps.ads.models import AdCampaign, AdWaitlistEntry
 from apps.jobs.models import JobListing, JobReport
+from apps.accommodation.models import AccommodationListing, HostelAgentRequest
 from apps.messaging.models import Conversation, Message
 from apps.messaging.serializers import MessageSerializer
-from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
+from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription,EmergencyContact
 from .permissions import IsAdminOrAbove, IsModeratorOrAbove
-from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminAdministratorSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer
+from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminAdministratorSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer,EmergencyContactSerializer
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
 from apps.notifications.services import notify_user, dispatch_notification
 from apps.notifications.models import Notification
+from config.storage import optimized_image_response
 import logging
 
 logger = logging.getLogger(__name__)
@@ -147,8 +148,7 @@ def report_evidence_image(request, evidence_id):
     if not request.user.is_staff and evidence.report.reporter_id != request.user.pk:
         from rest_framework.exceptions import PermissionDenied
         raise PermissionDenied("You cannot view evidence attached to another student's report.")
-    content_type = mimetypes.guess_type(evidence.image.name)[0] or "application/octet-stream"
-    return FileResponse(evidence.image.open("rb"), content_type=content_type)
+    return optimized_image_response(evidence.image)
 
 class AdminVerificationViewSet(viewsets.ModelViewSet):
     serializer_class = AdminVerificationSerializer
@@ -227,8 +227,7 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
         if not verification.student_id_image:
             from rest_framework.exceptions import NotFound
             raise NotFound("No student ID image was submitted.")
-        content_type = mimetypes.guess_type(verification.student_id_image.name)[0] or "application/octet-stream"
-        return FileResponse(verification.student_id_image.open("rb"), content_type=content_type)
+        return optimized_image_response(verification.student_id_image)
 
 class AdminReviewViewSet(viewsets.ModelViewSet):
     queryset = SellerReview.objects.select_related("seller", "reviewer", "order").all()
@@ -468,8 +467,7 @@ class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
         if not change_request.requested_profile_picture:
             from rest_framework.exceptions import NotFound
             raise NotFound("No profile picture was included in this request.")
-        content_type = mimetypes.guess_type(change_request.requested_profile_picture.name)[0] or "application/octet-stream"
-        return FileResponse(change_request.requested_profile_picture.open("rb"), content_type=content_type)
+        return optimized_image_response(change_request.requested_profile_picture)
 
 class AdminConversationViewSet(viewsets.GenericViewSet):
     serializer_class = AdminConversationSerializer
@@ -567,6 +565,8 @@ def dashboard(request):
             "pending_reviews": SellerReview.objects.filter(status=SellerReview.Status.PENDING).count(),
             "open_review_reports": ReviewReport.objects.filter(status__in=(ReviewReport.Status.OPEN, ReviewReport.Status.REVIEWING)).count(),
             "pending_job_listings": JobListing.objects.filter(status=JobListing.Status.PENDING_REVIEW).count(),
+            "pending_accommodation_listings": AccommodationListing.objects.filter(status=AccommodationListing.Status.PENDING_REVIEW).count(),
+            "pending_hostel_agent_requests": HostelAgentRequest.objects.filter(status=HostelAgentRequest.Status.PENDING).count(),
             "open_job_reports": JobReport.objects.filter(status__in=(JobReport.Status.OPEN, JobReport.Status.REVIEWING)).count(),
             "waiting_advertisers": AdWaitlistEntry.objects.filter(status=AdWaitlistEntry.Status.WAITING).count(),
         },
@@ -582,6 +582,7 @@ def queue_counts(request):
         "profile_changes": ProfileChangeRequest.objects.filter(status=ProfileChangeRequest.Status.PENDING).count(),
         "marketplace": Product.objects.filter(status=Product.Status.PENDING_REVIEW).count(),
         "jobs": JobListing.objects.filter(status=JobListing.Status.PENDING_REVIEW).count() + JobReport.objects.filter(status__in=(JobReport.Status.OPEN, JobReport.Status.REVIEWING)).count(),
+        "accommodation": AccommodationListing.objects.filter(status=AccommodationListing.Status.PENDING_REVIEW).count() + HostelAgentRequest.objects.filter(status=HostelAgentRequest.Status.PENDING).count(),
         "lost_found": ItemClaim.objects.filter(status=ItemClaim.Status.PENDING).count() + ItemMatch.objects.filter(is_reviewed=False, is_dismissed=False).count(),
         "reports": UserReport.objects.filter(is_resolved=False).count(),
         "reviews": SellerReview.objects.filter(status=SellerReview.Status.PENDING).count() + ReviewReport.objects.filter(status__in=(ReviewReport.Status.OPEN, ReviewReport.Status.REVIEWING)).count(),
@@ -670,6 +671,7 @@ def system_status(request):
             "marketplace": config.marketplace_enabled,
             "lost_found": config.lost_found_enabled,
             "jobs": config.jobs_enabled,
+            "accommodation": config.accommodation_enabled,
             "external_job_submissions": config.external_job_submissions_enabled,
             "messaging": config.messaging_enabled,
             "ads": config.ads_enabled,
@@ -719,8 +721,7 @@ def system_logo(request):
     if not config.site_logo:
         from rest_framework.exceptions import NotFound
         raise NotFound("The site logo has not been set.")
-    content_type = mimetypes.guess_type(config.site_logo.name)[0] or "application/octet-stream"
-    return FileResponse(config.site_logo.open("rb"), content_type=content_type)
+    return optimized_image_response(config.site_logo)
 
 class SupportTicketViewSet(viewsets.ModelViewSet):
     serializer_class = SupportTicketSerializer
@@ -808,7 +809,19 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             message = SupportMessage.objects.create(ticket=ticket, sender=request.user, body=body)
             for upload in uploads:
-                SupportAttachment.objects.create(message=message, file=upload, original_name=get_valid_filename(upload.name)[:255], content_type=upload.content_type)
+                original_name = get_valid_filename(upload.name)[:255]
+                content_type = upload.content_type
+                if content_type.startswith("image/"):
+                    from config.storage import optimize_uploaded_image
+                    try:
+                        stored_file = optimize_uploaded_image(upload, max_size=(1440, 1440), quality=78)
+                    except ValueError as error:
+                        raise ValidationError({"attachment_files": "Upload a valid image file."}) from error
+                    stored_file.name = f"{original_name.rsplit('.', 1)[0]}.webp"
+                    content_type = "image/webp"
+                else:
+                    stored_file = upload
+                SupportAttachment.objects.create(message=message, file=stored_file, original_name=original_name, content_type=content_type)
             if ticket.status == SupportTicket.Status.OPEN and request.user.is_staff:
                 ticket.status = SupportTicket.Status.IN_PROGRESS
                 ticket.save(update_fields=("status", "updated_at"))
@@ -941,6 +954,37 @@ class PlatformSettingsView(generics.RetrieveUpdateAPIView):
         changed_fields = tuple(key for key in serializer.validated_data if key != "site_logo")
         AdminLog.objects.create(actor=self.request.user, action="platform_settings_updated", target_type="PlatformSettings", target_id="1", metadata={key: getattr(settings_obj, key) for key in changed_fields})
 
+
+class PublicEmergencyContactListView(generics.ListAPIView):
+    serializer_class = EmergencyContactSerializer
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def get_queryset(self):
+        return EmergencyContact.objects.filter(is_active=True).only(
+            "id", "name", "phone_number", "description", "location", "sort_order", "is_active", "updated_at"
+        )
+
+
+class AdminEmergencyContactViewSet(viewsets.ModelViewSet):
+    serializer_class = EmergencyContactSerializer
+    permission_classes = [IsAdminOrAbove]
+    queryset = EmergencyContact.objects.all()
+    search_fields = ("name", "phone_number", "location", "description")
+    ordering_fields = ("name", "sort_order", "updated_at")
+
+    def perform_create(self, serializer):
+        contact = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="emergency_contact_created", target_type="EmergencyContact", target_id=str(contact.pk), metadata={"name": contact.name, "active": contact.is_active})
+
+    def perform_update(self, serializer):
+        contact = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="emergency_contact_updated", target_type="EmergencyContact", target_id=str(contact.pk), metadata={"name": contact.name, "active": contact.is_active})
+
+    def perform_destroy(self, instance):
+        AdminLog.objects.create(actor=self.request.user, action="emergency_contact_deleted", target_type="EmergencyContact", target_id=str(instance.pk), metadata={"name": instance.name})
+        instance.delete()
+
 class AdminPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AdminPaymentSerializer
     permission_classes = [IsAdminOrAbove]
@@ -977,8 +1021,7 @@ class AdminLostFoundViewSet(viewsets.ModelViewSet):
         if not report.image:
             from rest_framework.exceptions import NotFound
             raise NotFound("This report has no image.")
-        content_type = mimetypes.guess_type(report.image.name)[0] or "application/octet-stream"
-        return FileResponse(report.image.open("rb"), content_type=content_type)
+        return optimized_image_response(report.image)
 
 class AdminItemClaimViewSet(viewsets.ModelViewSet):
     serializer_class = AdminItemClaimSerializer
@@ -1031,8 +1074,7 @@ class AdminProductViewSet(viewsets.ModelViewSet):
         if not image:
             from rest_framework.exceptions import NotFound
             raise NotFound("This listing has no image.")
-        content_type = mimetypes.guess_type(image.image.name)[0] or "application/octet-stream"
-        return FileResponse(image.image.open("rb"), content_type=content_type)
+        return optimized_image_response(image.image)
     @transaction.atomic
     def perform_update(self, serializer):
         product = Product.objects.select_for_update().select_related("seller").get(pk=serializer.instance.pk)

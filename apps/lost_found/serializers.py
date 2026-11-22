@@ -52,3 +52,16 @@ class ItemClaimSerializer(serializers.ModelSerializer):
         if report.report_type != LostFoundReport.Type.FOUND or not report.is_active:
             raise serializers.ValidationError("Claims can only be made against an active found-item report.")
         return report
+
+    def create(self, validated_data):
+        evidence = validated_data.get("evidence")
+        if evidence and evidence.content_type.startswith("image/"):
+            from config.storage import optimize_uploaded_image
+            try:
+                optimized = optimize_uploaded_image(evidence, max_size=(1440, 1440), quality=78)
+            except ValueError as error:
+                raise serializers.ValidationError({"evidence": str(error)}) from error
+            evidence.name = f"{evidence.name.rsplit('.', 1)[0]}.webp"
+            optimized.name = evidence.name
+            validated_data["evidence"] = optimized
+        return super().create(validated_data)

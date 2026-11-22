@@ -40,7 +40,7 @@ class UserSerializer(serializers.ModelSerializer):
     username_change_available_at = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "public_id", "username", "username_change_available_at", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
+        fields = ("id", "public_id", "username", "username_change_available_at", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "is_hostel_agent", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
         read_only_fields = fields
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
@@ -62,7 +62,7 @@ class StudentPublicProfileSerializer(serializers.ModelSerializer):
     student_status = serializers.CharField(read_only=True)
     class Meta:
         model = User
-        fields = ("public_id", "username", "first_name", "last_name", "department", "faculty", "level", "campus", "course_name", "student_status", "entry_year", "is_student_verified", "last_seen_at", "profile_picture_url", "public_name_enabled", "public_department_enabled", "public_level_enabled")
+        fields = ("public_id", "username", "first_name", "last_name", "department", "faculty", "level", "campus", "course_name", "student_status", "entry_year", "is_student_verified", "is_hostel_agent", "last_seen_at", "profile_picture_url", "public_name_enabled", "public_department_enabled", "public_level_enabled")
         read_only_fields = fields
     def get_profile_picture_url(self, obj):
         return f"/api/accounts/profile-image/{obj.public_id}/" if obj.profile_picture and obj.public_profile_enabled and obj.public_profile_picture_enabled else None

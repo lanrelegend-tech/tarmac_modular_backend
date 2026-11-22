@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "apps.notifications.apps.NotificationsConfig", "apps.administration.apps.AdministrationConfig",
     "apps.reviews.apps.ReviewsConfig",
     "apps.jobs.apps.JobsConfig",
+    "apps.accommodation.apps.AccommodationConfig",
 ]
 MIDDLEWARE = ["django.middleware.security.SecurityMiddleware", "whitenoise.middleware.WhiteNoiseMiddleware", "corsheaders.middleware.CorsMiddleware",
     "config.middleware.MaintenanceModeMiddleware",
