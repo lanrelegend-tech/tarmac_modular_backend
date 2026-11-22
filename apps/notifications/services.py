@@ -93,15 +93,18 @@ def send_official_match_message(match, user, report_title, confirmed=False):
     return conversation
 
 
-def notify_user(user, subject, body, data, event_key):
+def notify_user(user, subject, body, data, event_key, *, dispatch_email=False, force_email=False):
     queue_notification(user, Notification.Channel.IN_APP, subject, body, data, f"{event_key}:in_app")
     from apps.administration.models import PlatformSettings
     platform = PlatformSettings.get_solo()
     kind = (data or {}).get("kind", "")
     category = (data or {}).get("notification_category") or notification_category(kind)
     category_settings = (platform.notification_channels or {}).get(category, {})
-    if platform.email_notifications_enabled and category_settings.get("email", True) and user.notification_email_enabled and user.email:
-        queue_notification(user, Notification.Channel.EMAIL, subject, body, data, f"{event_key}:email")
+    email_notification = None
+    if platform.email_notifications_enabled and category_settings.get("email", True) and (force_email or user.notification_email_enabled) and user.email:
+        email_notification = queue_notification(user, Notification.Channel.EMAIL, subject, body, data, f"{event_key}:email")
+    if dispatch_email and email_notification:
+        transaction.on_commit(lambda notification_id=email_notification.pk: dispatch_notification(notification_id))
     if category_settings.get("whatsapp", False) and user.notification_whatsapp_enabled and user.whatsapp_consent_at and user.whatsapp_number:
         template_key = whatsapp_template_key((data or {}).get("whatsapp_template_kind") or kind)
         if template_key and os.getenv(template_key):
@@ -109,6 +112,8 @@ def notify_user(user, subject, body, data, event_key):
 
 
 def notification_category(kind):
+    if kind.startswith("profile_change"):
+        return "account_security"
     if kind.startswith(("lost_found", "item_claim")):
         return "lost_found"
     if kind.startswith("support"):
@@ -165,8 +170,11 @@ def _send_email(notification):
         action_url = f"{origin}/marketplace/{product_id}" if product_id else f"{origin}/dashboard"
         action_label = "View order update"
     elif kind.startswith("profile_change"):
-        action_url = f"{origin}/admin/profile-changes" if user.is_staff else f"{origin}/profile"
-        action_label = "Review profile request" if user.is_staff else "Open profile"
+        if user.is_staff:
+            action_url, action_label = f"{origin}/admin/profile-changes", "Review profile request"
+        else:
+            action_url = f"{origin}/profile#profile-change-requests"
+            action_label = "Reply in Tarmac" if kind == "profile_change_question" else "View profile request"
     elif kind == "admin_conversation_reply":
         conversation_id = data.get("conversation_id")
         action_url = f"{origin}/messages?conversation={conversation_id}" if conversation_id else f"{origin}/messages"

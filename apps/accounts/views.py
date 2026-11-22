@@ -2,6 +2,7 @@ import mimetypes
 import logging
 import hashlib
 from datetime import timedelta
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from django.contrib.admin.views.decorators import staff_member_required
@@ -22,10 +23,14 @@ from .serializers import RegisterSerializer, UserSerializer, StudentPublicProfil
 from .permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.permissions import IsAdminOrAbove
 from .services import consume_account_action_token, issue_account_action_token
+from .utils import username_change_available_at
 
 logger = logging.getLogger(__name__)
 class AccountActionThrottle(AnonRateThrottle):
     scope = "account_action"
+
+class UsernameAvailabilityThrottle(AnonRateThrottle):
+    scope = "username_availability"
 
 class SuspensionAppealView(generics.GenericAPIView):
     permission_classes = [permissions.AllowAny]
@@ -58,6 +63,33 @@ class SuspensionAppealView(generics.GenericAPIView):
         for administrator in User.objects.filter(is_staff=True, is_active=True, is_suspended=False).iterator():
             notify_user(administrator, "New account suspension appeal", action_token.user.username, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"suspension-appeal:{ticket.pk}:admin:{administrator.pk}")
         return Response({"detail": "Your appeal was sent to Tarmac Support. You will receive an email when it has been reviewed."}, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@permission_classes([permissions.AllowAny])
+@throttle_classes([UsernameAvailabilityThrottle])
+def username_availability(request):
+    username = str(request.query_params.get("username", "")).strip()
+    if not username:
+        return Response({"available": False, "message": "Enter a username to check."})
+    try:
+        User._meta.get_field("username").run_validators(username)
+    except DjangoValidationError as exc:
+        return Response({"available": False, "message": " ".join(exc.messages)})
+
+    matches = User.objects.filter(username__iexact=username)
+    current_user = request.user if request.user.is_authenticated else None
+    same_as_current = bool(current_user and current_user.username.casefold() == username.casefold())
+    if current_user:
+        matches = matches.exclude(pk=current_user.pk)
+    available = same_as_current or not matches.exists()
+    payload = {"available": available, "message": "Username is available." if available else "That username is already taken."}
+    if current_user:
+        can_change = same_as_current or not current_user.username_changed_at or timezone.now() >= username_change_available_at(current_user.username_changed_at)
+        payload["can_change"] = can_change
+        if not can_change:
+            payload["message"] = "You can change your username once every 3 months. Please wait until your next change date."
+    return Response(payload)
 
 class CourseProgramViewSet(viewsets.ModelViewSet):
     serializer_class = CourseProgramSerializer
@@ -132,7 +164,7 @@ def public_marketplace_identity(request, public_id):
     from apps.reviews.serializers import SellerReviewSerializer
     jobs = JobListing.objects.filter(owner=user, anonymous_identity=identity, identity_type="anonymous", source=JobListing.Source.STUDENT, status=JobListing.Status.ACTIVE, deadline__gte=timezone.localdate(), category__is_active=True).select_related("category", "anonymous_identity")
     from apps.jobs.serializers import JobListingSerializer
-    return Response({"public_id": str(identity.public_id), "handle": identity.handle, "is_enabled": identity.is_enabled, "is_owner": is_owner, "is_student_verified": user.is_student_verified, "student_status": user.student_status, "last_seen_at": user.last_seen_at, "products": ProductSerializer(products, many=True, context={"request": request}).data, "jobs": JobListingSerializer(jobs, many=True, context={"request": request}).data, "reviews": SellerReviewSerializer(reviews, many=True, context={"request": request}).data})
+    return Response({"public_id": str(identity.public_id), "handle": identity.handle, "campus": user.campus, "is_enabled": identity.is_enabled, "is_owner": is_owner, "is_student_verified": user.is_student_verified, "student_status": user.student_status, "last_seen_at": user.last_seen_at, "products": ProductSerializer(products, many=True, context={"request": request}).data, "jobs": JobListingSerializer(jobs, many=True, context={"request": request}).data, "reviews": SellerReviewSerializer(reviews, many=True, context={"request": request}).data})
 
 @api_view(["GET"])
 @permission_classes([IsVerifiedStudent])
@@ -195,9 +227,19 @@ class ProfileChangeRequestViewSet(viewsets.ModelViewSet):
         body = str(request.data.get("body", "")).strip()
         if len(body) < 2 or len(body) > 3000:
             raise ValidationError({"body": "Write a reply between 2 and 3000 characters."})
-        ProfileChangeMessage.objects.create(request=change_request, sender=request.user, body=body)
+        message = ProfileChangeMessage.objects.create(request=change_request, sender=request.user, body=body)
         change_request.status = ProfileChangeRequest.Status.PENDING
         change_request.save(update_fields=("status", "updated_at"))
+        from apps.notifications.services import notify_user
+        for administrator in User.objects.filter(is_staff=True, is_active=True, is_suspended=False):
+            notify_user(
+                administrator,
+                "Student replied to a profile change question",
+                f"{request.user.get_full_name().strip() or request.user.username} replied to profile change request #{change_request.pk}. Open the request in Tarmac to review the answer.",
+                {"kind": "profile_change_reply", "request_id": change_request.pk},
+                f"profile-change-reply:{message.pk}:admin:{administrator.pk}",
+                dispatch_email=True,
+            )
         return Response(self.get_serializer(change_request).data)
 
 

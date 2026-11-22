@@ -5,6 +5,7 @@ from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from .models import User, StudentVerification, AccountActionToken, ProfileChangeRequest, ProfileChangeMessage, CourseProgram, AnonymousMarketplaceIdentity
+from .utils import username_change_available_at
 
 
 def normalize_whatsapp_number(value):
@@ -36,9 +37,10 @@ class UserSerializer(serializers.ModelSerializer):
     can_access_student_features = serializers.SerializerMethodField()
     course_name = serializers.CharField(source="course.name", read_only=True, allow_null=True)
     student_status = serializers.CharField(read_only=True)
+    username_change_available_at = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "public_id", "username", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
+        fields = ("id", "public_id", "username", "username_change_available_at", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
         read_only_fields = fields
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
@@ -49,13 +51,18 @@ class UserSerializer(serializers.ModelSerializer):
         from .permissions import is_student_feature_eligible
         return is_student_feature_eligible(obj)
 
+    def get_username_change_available_at(self, obj):
+        if not obj.username_changed_at:
+            return None
+        return username_change_available_at(obj.username_changed_at).isoformat()
+
 class StudentPublicProfileSerializer(serializers.ModelSerializer):
     profile_picture_url = serializers.SerializerMethodField()
     course_name = serializers.CharField(source="course.name", read_only=True, allow_null=True)
     student_status = serializers.CharField(read_only=True)
     class Meta:
         model = User
-        fields = ("public_id", "username", "first_name", "last_name", "department", "faculty", "level", "course_name", "student_status", "entry_year", "is_student_verified", "last_seen_at", "profile_picture_url", "public_name_enabled", "public_department_enabled", "public_level_enabled")
+        fields = ("public_id", "username", "first_name", "last_name", "department", "faculty", "level", "campus", "course_name", "student_status", "entry_year", "is_student_verified", "last_seen_at", "profile_picture_url", "public_name_enabled", "public_department_enabled", "public_level_enabled")
         read_only_fields = fields
     def get_profile_picture_url(self, obj):
         return f"/api/accounts/profile-image/{obj.public_id}/" if obj.profile_picture and obj.public_profile_enabled and obj.public_profile_picture_enabled else None
@@ -103,9 +110,10 @@ class RegisterSerializer(serializers.ModelSerializer):
     password=serializers.CharField(write_only=True, min_length=8)
     matric_number=serializers.CharField(required=True, max_length=40)
     phone_number=serializers.CharField(required=True, max_length=25)
+    campus=serializers.CharField(required=True, max_length=120)
     course=serializers.PrimaryKeyRelatedField(queryset=CourseProgram.objects.filter(is_active=True), required=True)
     entry_year=serializers.IntegerField(required=True, min_value=2000)
-    class Meta: model=User; fields=("id","public_id","username","first_name","last_name","email","matric_number","phone_number","password","department","faculty","level","course","entry_year"); read_only_fields=("id","public_id")
+    class Meta: model=User; fields=("id","public_id","username","first_name","last_name","email","matric_number","phone_number","campus","password","department","faculty","level","course","entry_year"); read_only_fields=("id","public_id")
     def validate_email(self, value):
         value = value.strip().lower()
         if User.objects.filter(email__iexact=value).exists():
@@ -127,6 +135,11 @@ class RegisterSerializer(serializers.ModelSerializer):
         value = value.strip()
         if sum(character.isdigit() for character in value) < 7:
             raise serializers.ValidationError("Enter a valid phone number with at least 7 digits.")
+        return value
+    def validate_campus(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Enter the campus where you study.")
         return value
     def validate_password(self, value):
         validate_password(value)
@@ -163,6 +176,11 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         value = value.strip()
         if User.objects.filter(username__iexact=value).exclude(pk=self.instance.pk).exists():
             raise serializers.ValidationError("This username is already in use.")
+        if value.casefold() != self.instance.username.casefold() and self.instance.username_changed_at:
+            next_change = username_change_available_at(self.instance.username_changed_at)
+            if timezone.now() < next_change:
+                available_date = timezone.localtime(next_change).strftime("%B %-d, %Y")
+                raise serializers.ValidationError(f"You can change your username once every 3 months. You can request another change after {available_date}.")
         return value
 
     def validate(self, attrs):
@@ -180,6 +198,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         return attrs
 
     def update(self, instance, validated_data):
+        if "username" in validated_data and validated_data["username"].casefold() != instance.username.casefold():
+            validated_data["username_changed_at"] = timezone.now()
         enabling = validated_data.get("notification_whatsapp_enabled") is True and (not instance.notification_whatsapp_enabled or not instance.whatsapp_consent_at)
         disabling = validated_data.get("notification_whatsapp_enabled") is False
         if enabling:
@@ -256,8 +276,8 @@ class StudentProfileChangeRequestSerializer(serializers.ModelSerializer):
     messages = ProfileChangeMessageSerializer(many=True, read_only=True)
     class Meta:
         model = ProfileChangeRequest
-        fields = ("id", "changes", "profile_picture", "requested_changes", "requested_profile_picture_url", "status", "messages", "created_at", "updated_at")
-        read_only_fields = ("requested_changes", "status", "messages", "created_at", "updated_at")
+        fields = ("id", "changes", "profile_picture", "requested_changes", "original_values", "requested_profile_picture_url", "status", "messages", "created_at", "updated_at")
+        read_only_fields = ("requested_changes", "original_values", "status", "messages", "created_at", "updated_at")
 
     def validate_profile_picture(self, image):
         if image.size > 5 * 1024 * 1024:
@@ -330,7 +350,11 @@ class StudentProfileChangeRequestSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         changes = validated_data.pop("changes", {})
         picture = validated_data.pop("profile_picture", None)
-        return ProfileChangeRequest.objects.create(user=self.context["request"].user, requested_changes=changes, requested_profile_picture=picture)
+        user = self.context["request"].user
+        original_values = {field: str(getattr(user, field, "") or "") for field in changes}
+        if picture:
+            original_values["profile_picture"] = "Profile photo on account" if user.profile_picture else "No profile photo"
+        return ProfileChangeRequest.objects.create(user=user, requested_changes=changes, original_values=original_values, requested_profile_picture=picture)
 
     def get_requested_profile_picture_url(self, obj):
         if not obj.requested_profile_picture:
@@ -343,12 +367,13 @@ class StudentProfileChangeRequestSerializer(serializers.ModelSerializer):
 class AdminProfileChangeRequestSerializer(serializers.ModelSerializer):
     user_name = serializers.SerializerMethodField()
     user_email = serializers.EmailField(source="user.email", read_only=True)
+    current_profile_picture_url = serializers.SerializerMethodField()
     requested_profile_picture_url = serializers.SerializerMethodField()
     messages = ProfileChangeMessageSerializer(many=True, read_only=True)
     class Meta:
         model = ProfileChangeRequest
-        fields = ("id", "user", "user_name", "user_email", "requested_changes", "requested_profile_picture_url", "status", "messages", "reviewed_by", "reviewed_at", "created_at", "updated_at")
-        read_only_fields = ("id", "user", "user_name", "user_email", "requested_changes", "requested_profile_picture_url", "messages", "reviewed_by", "reviewed_at", "created_at", "updated_at")
+        fields = ("id", "user", "user_name", "user_email", "requested_changes", "original_values", "current_profile_picture_url", "requested_profile_picture_url", "status", "messages", "reviewed_by", "reviewed_at", "created_at", "updated_at")
+        read_only_fields = ("id", "user", "user_name", "user_email", "requested_changes", "original_values", "current_profile_picture_url", "requested_profile_picture_url", "messages", "reviewed_by", "reviewed_at", "created_at", "updated_at")
     def get_user_name(self, obj):
         return obj.user.get_full_name().strip() or obj.user.username
     def get_requested_profile_picture_url(self, obj):
@@ -356,6 +381,13 @@ class AdminProfileChangeRequestSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get("request")
         path = f"/api/admin-tools/profile-change-requests/{obj.pk}/image/"
+        return request.build_absolute_uri(path) if request else path
+
+    def get_current_profile_picture_url(self, obj):
+        if not obj.user.profile_picture:
+            return None
+        request = self.context.get("request")
+        path = f"/api/accounts/profile-image/{obj.user.public_id}/"
         return request.build_absolute_uri(path) if request else path
 
     def validate_status(self, value):

@@ -26,7 +26,8 @@ from apps.reviews.models import ReviewReport, SellerReview
 from apps.products.models import Product
 from apps.payments.models import Payment
 from apps.lost_found.models import LostFoundReport, ItemMatch, ItemClaim
-from apps.ads.models import AdCampaign
+from apps.ads.models import AdCampaign, AdWaitlistEntry
+from apps.jobs.models import JobListing, JobReport
 from apps.messaging.models import Conversation, Message
 from apps.messaging.serializers import MessageSerializer
 from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription
@@ -382,7 +383,16 @@ class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
         change_request.save(update_fields=("status", "reviewed_by", "reviewed_at", "updated_at"))
         change_request.user.refresh_from_db()
         AdminLog.objects.create(actor=self.request.user, action=f"profile_change_request_{next_status}", target_type="ProfileChangeRequest", target_id=str(change_request.pk), metadata={"user_id": change_request.user_id, "changed_fields": list(change_request.requested_changes)})
-        notify_user(change_request.user, "Profile change request reviewed", "Your profile change request was " + ("approved and applied." if next_status == ProfileChangeRequest.Status.APPROVED else "declined. Open your profile to see the review conversation."), {"kind": "profile_change_review", "request_id": change_request.pk, "status": next_status}, f"profile-change-review:{change_request.pk}:{next_status}")
+        review_result = "approved and applied to your account" if next_status == ProfileChangeRequest.Status.APPROVED else "rejected"
+        notify_user(
+            change_request.user,
+            "Profile change request reviewed",
+            f"Your profile change request #{change_request.pk} was {review_result}. Sign in and open Profile change requests on your Tarmac profile to view the decision and conversation.",
+            {"kind": "profile_change_review", "request_id": change_request.pk, "status": next_status},
+            f"profile-change-review:{change_request.pk}:{next_status}",
+            dispatch_email=True,
+            force_email=True,
+        )
         serializer.instance = change_request
 
     @action(detail=True, methods=["post"])
@@ -396,7 +406,15 @@ class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
         ProfileChangeMessage.objects.create(request=change_request, sender=request.user, body=body)
         change_request.status = ProfileChangeRequest.Status.NEEDS_INFO
         change_request.save(update_fields=("status", "updated_at"))
-        notify_user(change_request.user, "Admin has a question about your profile request", body, {"kind": "profile_change_question", "request_id": change_request.pk}, f"profile-change-question:{change_request.pk}:{change_request.messages.count()}")
+        notify_user(
+            change_request.user,
+            "Admin has a question about your profile request",
+            f"The school has a question about profile change request #{change_request.pk}:\n\n{body}\n\nSign in to Tarmac, open your profile, and reply in the Profile change requests section.",
+            {"kind": "profile_change_question", "request_id": change_request.pk},
+            f"profile-change-question:{change_request.pk}:{change_request.messages.count()}",
+            dispatch_email=True,
+            force_email=True,
+        )
         return Response(self.get_serializer(change_request).data)
 
     @action(detail=True, methods=["get"], url_path="image")
@@ -500,7 +518,12 @@ def dashboard(request):
             "pending_profile_changes": ProfileChangeRequest.objects.filter(status=ProfileChangeRequest.Status.PENDING).count(),
             "open_support_tickets": SupportTicket.objects.filter(status__in=(SupportTicket.Status.OPEN, SupportTicket.Status.IN_PROGRESS)).count(),
             "pending_lost_found_claims": ItemClaim.objects.filter(status=ItemClaim.Status.PENDING).count(),
+            "pending_lost_found_matches": ItemMatch.objects.filter(is_reviewed=False, is_dismissed=False).count(),
             "pending_reviews": SellerReview.objects.filter(status=SellerReview.Status.PENDING).count(),
+            "open_review_reports": ReviewReport.objects.filter(status__in=(ReviewReport.Status.OPEN, ReviewReport.Status.REVIEWING)).count(),
+            "pending_job_listings": JobListing.objects.filter(status=JobListing.Status.PENDING_REVIEW).count(),
+            "open_job_reports": JobReport.objects.filter(status__in=(JobReport.Status.OPEN, JobReport.Status.REVIEWING)).count(),
+            "waiting_advertisers": AdWaitlistEntry.objects.filter(status=AdWaitlistEntry.Status.WAITING).count(),
         },
     })
 

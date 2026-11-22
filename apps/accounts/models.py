@@ -19,6 +19,7 @@ class User(AbstractUser):
     email = models.EmailField(unique=True)
     matric_number = models.CharField(max_length=40, unique=True, null=True, blank=True)
     public_id = models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
+    username_changed_at = models.DateTimeField(null=True, blank=True)
     public_name_enabled = models.BooleanField(default=False)
     public_department_enabled = models.BooleanField(default=False)
     public_level_enabled = models.BooleanField(default=False)
@@ -126,6 +127,7 @@ class ProfileChangeRequest(models.Model):
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile_change_requests")
     requested_changes = models.JSONField(default=dict)
+    original_values = models.JSONField(default=dict, blank=True)
     requested_profile_picture = models.ImageField(upload_to="profile_change_requests/", storage=PrivateCloudinaryImageStorage(), blank=True, null=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="profile_change_reviews")

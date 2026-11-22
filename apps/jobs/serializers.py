@@ -172,10 +172,14 @@ class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        if attrs["kind"] == JobListing.Kind.JOB:
-            attrs["service_intent"] = JobListing.ServiceIntent.OFFER
-        if attrs["category"].category_type != ("service" if attrs["kind"] == JobListing.Kind.SERVICE else "job"):
-            raise serializers.ValidationError({"category": "Choose a category that matches this opportunity type."})
+        if attrs.get("kind", JobListing.Kind.JOB) != JobListing.Kind.JOB:
+            raise serializers.ValidationError({"kind": "External business submissions are limited to job and internship opportunities. Student service offers and requests must be posted from a verified student account."})
+        if attrs.get("engagement") == JobListing.Engagement.SERVICE:
+            raise serializers.ValidationError({"engagement": "External businesses can submit job opportunities only."})
+        attrs["kind"] = JobListing.Kind.JOB
+        attrs["service_intent"] = JobListing.ServiceIntent.OFFER
+        if attrs["category"].category_type != "job":
+            raise serializers.ValidationError({"category": "Choose an active job category."})
         pay_min, pay_max = attrs.get("pay_min"), attrs.get("pay_max")
         if (pay_min is not None and pay_min < 0) or (pay_max is not None and pay_max < 0):
             raise serializers.ValidationError("Pay amounts cannot be negative.")

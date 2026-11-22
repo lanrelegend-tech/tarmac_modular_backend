@@ -62,6 +62,7 @@ class ProductSerializer(serializers.ModelSerializer):
     is_owner = serializers.SerializerMethodField()
     seller_verified = serializers.BooleanField(source="seller.is_student_verified", read_only=True)
     seller_name = serializers.SerializerMethodField()
+    seller_campus = serializers.CharField(source="seller.campus", read_only=True)
     seller_department = serializers.SerializerMethodField()
     seller_level = serializers.SerializerMethodField()
     seller_status = serializers.SerializerMethodField()
@@ -71,7 +72,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ("id", "seller_public_id", "seller_identity_type", "seller_profile_visible", "is_owner", "seller_verified", "seller_name", "seller_department", "seller_level", "seller_course", "seller_status", "category", "category_name", "title", "description", "condition", "price", "negotiable", "location", "visibility", "identity_type", "show_on_profile", "audience_public_ids", "status", "expires_at", "is_featured", "featured_until", "sponsor_listing", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "images", "created_at", "updated_at")
+        fields = ("id", "seller_public_id", "seller_identity_type", "seller_profile_visible", "is_owner", "seller_verified", "seller_name", "seller_campus", "seller_department", "seller_level", "seller_course", "seller_status", "category", "category_name", "title", "description", "condition", "price", "negotiable", "location", "visibility", "identity_type", "show_on_profile", "audience_public_ids", "status", "expires_at", "is_featured", "featured_until", "sponsor_listing", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "images", "created_at", "updated_at")
         read_only_fields = ("status", "expires_at", "is_featured", "featured_until", "created_at", "updated_at")
 
     def get_seller_name(self, obj):
