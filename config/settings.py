@@ -17,6 +17,10 @@ if not DEBUG and (not os.getenv("ALLOWED_HOSTS") or not any(host not in ("localh
     raise ImproperlyConfigured("Set ALLOWED_HOSTS for production.")
 if not DEBUG and not os.getenv("FRONTEND_ORIGIN"):
     raise ImproperlyConfigured("Set FRONTEND_ORIGIN for the school website.")
+# Email and management links need one canonical origin, while CORS may need
+# multiple exact origins. The first configured origin is the canonical site.
+FRONTEND_ORIGINS = [x.strip().rstrip("/") for x in os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").split(",") if x.strip()]
+FRONTEND_ORIGIN = FRONTEND_ORIGINS[0] if FRONTEND_ORIGINS else "http://localhost:3000"
 INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",
@@ -89,7 +93,7 @@ PRIVATE_MEDIA_ROOT = BASE_DIR / "private_media"
 DATA_UPLOAD_MAX_MEMORY_SIZE = 27 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-CORS_ALLOWED_ORIGINS = [x.strip() for x in os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").split(",") if x.strip()]
+CORS_ALLOWED_ORIGINS = FRONTEND_ORIGINS
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(
     [x.strip() for x in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if x.strip()]

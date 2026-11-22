@@ -346,7 +346,7 @@ class ExternalJobSubmissionView(APIView):
             source=JobListing.Source.BUSINESS, owner=None, status=JobListing.Status.PENDING_EMAIL,
             business_email_token_hash=_token_digest(token), business_email_token_expires_at=expires,
         )
-        frontend_origin = getattr(settings, "FRONTEND_ORIGIN", "http://localhost:3000").rstrip("/")
+        frontend_origin = settings.FRONTEND_ORIGIN
         verify_url = f"{frontend_origin}/jobs/verify-submission#{token}"
         _send_external_email(
             subject="Confirm your Tarmac job submission",
@@ -405,7 +405,7 @@ class ExternalJobResendEmailView(APIView):
             listing.business_email_token_hash = _token_digest(token)
             listing.business_email_token_expires_at = timezone.now() + timedelta(hours=24)
             listing.save(update_fields=("business_email_token_hash", "business_email_token_expires_at", "updated_at"))
-            origin = getattr(settings, "FRONTEND_ORIGIN", "http://localhost:3000").rstrip("/")
+            origin = settings.FRONTEND_ORIGIN
             _send_external_email(subject="Confirm your Tarmac job submission", body="Use the secure link to confirm the business email for your job submission. This link expires in 24 hours.", recipient=listing.business_email, url=f"{origin}/jobs/verify-submission#{token}", action_label="Confirm email")
         return Response({"detail": "If a submission needs email confirmation, we sent a new link."})
 
@@ -474,7 +474,7 @@ class AdminJobListingViewSet(viewsets.ModelViewSet):
         listing.save(update_fields=("status", "reviewed_by", "reviewed_at", "admin_note", "management_token_hash", "management_token_expires_at", "updated_at"))
         AdminLog.objects.create(actor=request.user, action="job_listing_approved", target_type="JobListing", target_id=str(listing.pk), metadata={"source": listing.source})
         if listing.source == JobListing.Source.BUSINESS:
-            frontend_origin = getattr(settings, "FRONTEND_ORIGIN", "http://localhost:3000").rstrip("/")
+            frontend_origin = settings.FRONTEND_ORIGIN
             manage_url = f"{frontend_origin}/jobs/manage#{raw_token}"
             _send_external_email(subject="Your Tarmac job opportunity is approved", body=f"Your opportunity, {listing.title}, has been approved and is now visible to verified KWASU students. Use your private link to pause it, mark it filled, or request removal. Keep this link private.", recipient=listing.business_email, url=manage_url, action_label="Manage your listing")
         elif listing.owner_id:
@@ -519,7 +519,7 @@ class AdminJobListingViewSet(viewsets.ModelViewSet):
         listing.management_token_expires_at = min(timezone.now() + timedelta(days=90), timezone.make_aware(timezone.datetime.combine(listing.deadline, timezone.datetime.max.time())))
         listing.management_token_revoked_at = None
         listing.save(update_fields=("management_token_hash", "management_token_expires_at", "management_token_revoked_at", "updated_at"))
-        origin = getattr(settings, "FRONTEND_ORIGIN", "http://localhost:3000").rstrip("/")
+        origin = settings.FRONTEND_ORIGIN
         _send_external_email(subject="Your Tarmac job management link was renewed", body=f"A new private management link was created for {listing.title}. The old link no longer works.", recipient=listing.business_email, url=f"{origin}/jobs/manage#{raw_token}", action_label="Manage your listing")
         AdminLog.objects.create(actor=request.user, action="external_job_management_link_rotated", target_type="JobListing", target_id=str(listing.pk), metadata={})
         return Response({"detail": "A new management link was emailed to the verified business address."})
