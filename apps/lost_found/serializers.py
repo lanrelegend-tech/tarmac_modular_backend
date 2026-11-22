@@ -7,7 +7,11 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
     contact_details = serializers.CharField(write_only=True, required=False, allow_blank=True)
     category_name = serializers.CharField(source="category.name", read_only=True)
     image_url = serializers.SerializerMethodField()
-    class Meta: model=LostFoundReport; fields=("id","report_type","title","description","category","category_name","colour","location","incident_date","identifying_details","contact_details","image","image_url","status","created_at"); read_only_fields=("status","created_at")
+    is_owner = serializers.SerializerMethodField()
+    class Meta: model=LostFoundReport; fields=("id","report_type","title","description","category","category_name","colour","location","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner"); read_only_fields=("status","created_at","is_owner")
+    def get_is_owner(self, obj):
+        request = self.context.get("request")
+        return bool(request and request.user.is_authenticated and obj.reporter_id == request.user.pk)
     def get_image_url(self, obj):
         if not obj.image:
             return None
