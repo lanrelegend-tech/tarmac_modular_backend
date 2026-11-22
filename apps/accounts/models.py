@@ -33,6 +33,7 @@ class User(AbstractUser):
     level = models.CharField(max_length=30, blank=True); phone_number = models.CharField(max_length=25, blank=True)
     whatsapp_number = models.CharField(max_length=25, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
     campus = models.CharField(max_length=120, blank=True); bio = models.CharField(max_length=200, blank=True)
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT)
@@ -106,7 +107,7 @@ class AnonymousMarketplaceIdentity(models.Model):
         return self.handle
 
 class AccountActionToken(models.Model):
-    class Purpose(models.TextChoices): EMAIL_VERIFY="email_verify", "Email verification"; PASSWORD_RESET="password_reset", "Password reset"; SUSPENSION_APPEAL="suspension_appeal", "Suspension appeal"
+    class Purpose(models.TextChoices): EMAIL_VERIFY="email_verify", "Email verification"; PASSWORD_RESET="password_reset", "Password reset"; SUSPENSION_APPEAL="suspension_appeal", "Suspension appeal"; ACCOUNT_DELETE="account_delete", "Account deletion confirmation"
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="action_tokens")
     purpose = models.CharField(max_length=20, choices=Purpose.choices)
     token_hash = models.CharField(max_length=64, unique=True)

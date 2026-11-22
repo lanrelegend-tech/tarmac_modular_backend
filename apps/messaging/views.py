@@ -34,6 +34,13 @@ class ConversationViewSet(viewsets.ModelViewSet):
         if identity_type in ("normal", "anonymous"):
             queryset = queryset.filter(participant_snapshots__user=self.request.user, participant_snapshots__identity_type=identity_type)
         return queryset.distinct()
+    @action(detail=False, methods=["get"], url_path="unread-count")
+    def unread_count(self, request):
+        count = Message.objects.filter(
+            conversation__participants=request.user,
+            read_at__isnull=True,
+        ).exclude(sender=request.user).count()
+        return Response({"count": count})
     def create(self, request, *args, **kwargs):
         raise PermissionDenied("Start a conversation from a marketplace listing, lost-and-found match, or official support message.")
     @action(detail=True, methods=["post"], url_path="block")

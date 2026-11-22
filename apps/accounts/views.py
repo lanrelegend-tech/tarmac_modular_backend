@@ -2,6 +2,7 @@ import mimetypes
 import logging
 import hashlib
 from datetime import timedelta
+from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
@@ -90,6 +91,80 @@ def username_availability(request):
         if not can_change:
             payload["message"] = "You can change your username once every 3 months. Please wait until your next change date."
     return Response(payload)
+
+
+@api_view(["POST"])
+@permission_classes([permissions.IsAuthenticated])
+@throttle_classes([ScopedRateThrottle])
+@throttle_scope("account_action")
+def request_account_deletion(request):
+    user = request.user
+    if user.is_staff or user.role != User.Role.STUDENT:
+        raise ValidationError({"detail": "Administrator accounts cannot be deleted through student profile settings."})
+    if not user.email_verified:
+        raise ValidationError({"detail": "Verify your email address before requesting account deletion."})
+    if user.deleted_at:
+        raise ValidationError({"detail": "This account has already been deleted."})
+    issue_account_action_token(user, AccountActionToken.Purpose.ACCOUNT_DELETE)
+    return Response({"detail": f"We sent a confirmation link to {user.email}. Your account stays active until you open that link."})
+
+
+@api_view(["POST"])
+@permission_classes([permissions.AllowAny])
+@throttle_classes([AccountActionThrottle])
+@transaction.atomic
+def confirm_account_deletion(request):
+    serializer = EmailTokenSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    user = consume_account_action_token(
+        serializer.validated_data["email"],
+        serializer.validated_data["token"],
+        AccountActionToken.Purpose.ACCOUNT_DELETE,
+    )
+    if not user:
+        raise ValidationError({"token": "This account deletion link is invalid or expired. Sign in and request a new one."})
+
+    with transaction.atomic():
+        user = User.objects.select_for_update().get(pk=user.pk)
+        if user.is_staff or user.role != User.Role.STUDENT:
+            raise ValidationError({"detail": "Administrator accounts cannot be deleted through student profile settings."})
+        if user.deleted_at:
+            raise ValidationError({"detail": "This account has already been deleted."})
+        now = timezone.now()
+        user.deleted_at = now
+        user.is_active = False
+        user.is_suspended = False
+        user.public_profile_enabled = False
+        user.save(update_fields=("deleted_at", "is_active", "is_suspended", "public_profile_enabled"))
+        AnonymousMarketplaceIdentity.objects.filter(user=user).update(is_enabled=False)
+
+        from apps.products.models import Product
+        from apps.jobs.models import JobListing
+        from apps.lost_found.models import LostFoundReport
+        from apps.ads.models import AdCampaign
+        Product.objects.filter(seller=user).exclude(status__in=(Product.Status.SOLD, Product.Status.REMOVED)).update(status=Product.Status.REMOVED, is_featured=False)
+        JobListing.objects.filter(owner=user).exclude(status__in=(JobListing.Status.FILLED, JobListing.Status.EXPIRED, JobListing.Status.REJECTED, JobListing.Status.REMOVED)).update(status=JobListing.Status.REMOVED)
+        LostFoundReport.objects.filter(reporter=user, is_active=True).update(is_active=False)
+        AdCampaign.objects.filter(advertiser=user, status__in=(AdCampaign.Status.ACTIVE, AdCampaign.Status.SCHEDULED)).update(status=AdCampaign.Status.PAUSED)
+        AdCampaign.objects.filter(advertiser=user, status__in=(AdCampaign.Status.PENDING_PAYMENT, AdCampaign.Status.PENDING_REVIEW)).update(status=AdCampaign.Status.CANCELLED)
+
+        for verification in StudentVerification.objects.filter(user=user).exclude(student_id_image=""):
+            from .services import delete_verification_id_image
+            delete_verification_id_image(verification)
+            verification.save(update_fields=("student_id_image",))
+        for outstanding in OutstandingToken.objects.filter(user=user):
+            BlacklistedToken.objects.get_or_create(token=outstanding)
+
+        try:
+            from apps.administration.models import AdminLog
+            AdminLog.objects.create(actor=None, action="student_account_deleted", target_type="User", target_id=str(user.pk), metadata={"public_id": str(user.public_id)})
+        except Exception:
+            logger.exception("Could not record account deletion audit entry for user %s", user.pk)
+
+    response = Response({"detail": "Your Tarmac account has been deleted. The school can restore access if you contact support."})
+    response.delete_cookie(settings.AUTH_ACCESS_COOKIE, path="/", samesite=settings.AUTH_COOKIE_SAMESITE)
+    response.delete_cookie(settings.AUTH_REFRESH_COOKIE, path="/api/auth/", samesite=settings.AUTH_COOKIE_SAMESITE)
+    return response
 
 class CourseProgramViewSet(viewsets.ModelViewSet):
     serializer_class = CourseProgramSerializer

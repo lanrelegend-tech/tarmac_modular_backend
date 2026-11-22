@@ -367,15 +367,22 @@ class StudentProfileChangeRequestSerializer(serializers.ModelSerializer):
 class AdminProfileChangeRequestSerializer(serializers.ModelSerializer):
     user_name = serializers.SerializerMethodField()
     user_email = serializers.EmailField(source="user.email", read_only=True)
+    user_phone_number = serializers.CharField(source="user.phone_number", read_only=True)
+    user_public_id = serializers.UUIDField(source="user.public_id", read_only=True)
+    user_username = serializers.CharField(source="user.username", read_only=True)
+    user_anonymous_handle = serializers.SerializerMethodField()
     current_profile_picture_url = serializers.SerializerMethodField()
     requested_profile_picture_url = serializers.SerializerMethodField()
     messages = ProfileChangeMessageSerializer(many=True, read_only=True)
     class Meta:
         model = ProfileChangeRequest
-        fields = ("id", "user", "user_name", "user_email", "requested_changes", "original_values", "current_profile_picture_url", "requested_profile_picture_url", "status", "messages", "reviewed_by", "reviewed_at", "created_at", "updated_at")
-        read_only_fields = ("id", "user", "user_name", "user_email", "requested_changes", "original_values", "current_profile_picture_url", "requested_profile_picture_url", "messages", "reviewed_by", "reviewed_at", "created_at", "updated_at")
+        fields = ("id", "user", "user_name", "user_email", "user_phone_number", "user_public_id", "user_username", "user_anonymous_handle", "requested_changes", "original_values", "current_profile_picture_url", "requested_profile_picture_url", "status", "messages", "reviewed_by", "reviewed_at", "created_at", "updated_at")
+        read_only_fields = ("id", "user", "user_name", "user_email", "user_phone_number", "user_public_id", "user_username", "user_anonymous_handle", "requested_changes", "original_values", "current_profile_picture_url", "requested_profile_picture_url", "messages", "reviewed_by", "reviewed_at", "created_at", "updated_at")
     def get_user_name(self, obj):
         return obj.user.get_full_name().strip() or obj.user.username
+    def get_user_anonymous_handle(self, obj):
+        identity = getattr(obj.user, "anonymous_marketplace_identity", None)
+        return identity.handle if identity else None
     def get_requested_profile_picture_url(self, obj):
         if not obj.requested_profile_picture:
             return None

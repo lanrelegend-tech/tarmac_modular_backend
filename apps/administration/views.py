@@ -1,4 +1,5 @@
 from datetime import timedelta
+from uuid import UUID
 import hashlib
 import os
 import secrets
@@ -149,11 +150,23 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
     serializer_class = AdminVerificationSerializer
     permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
+    search_fields = ["user__email", "user__username", "user__first_name", "user__last_name", "user__matric_number", "user__anonymous_marketplace_identity__handle"]
 
     def get_queryset(self):
-        queryset = StudentVerification.objects.select_related("user", "user__course", "reviewed_by").order_by("status", "created_at")
+        queryset = StudentVerification.objects.select_related("user", "user__course", "user__anonymous_marketplace_identity", "reviewed_by").order_by("status", "created_at")
         status_filter = self.request.query_params.get("status")
         return queryset.filter(status=status_filter) if status_filter else queryset
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        term = str(self.request.query_params.get("search", "")).strip()
+        if term:
+            try:
+                public_id = UUID(term)
+            except (ValueError, TypeError, AttributeError):
+                return queryset
+            return queryset | self.get_queryset().filter(user__public_id=public_id)
+        return queryset
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -239,11 +252,22 @@ class AdminReviewReportViewSet(viewsets.ModelViewSet):
         AdminLog.objects.create(actor=self.request.user, action=f"review_report_{report.status}", target_type="ReviewReport", target_id=str(report.pk), metadata={"review_id": report.review_id, "review_status": report.review.status})
 
 class AdminAccountViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.select_related("course").all().order_by("-date_joined")
+    queryset = User.objects.select_related("course", "anonymous_marketplace_identity").all().order_by("-date_joined")
     serializer_class = AdminAccountSerializer
     permission_classes = [IsAdminOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
-    search_fields = ["email", "username", "matric_number"]
+    search_fields = ["email", "username", "first_name", "last_name", "matric_number", "anonymous_marketplace_identity__handle"]
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        term = str(self.request.query_params.get("search", "")).strip()
+        if term:
+            try:
+                public_id = UUID(term)
+            except (ValueError, TypeError, AttributeError):
+                return queryset
+            return queryset | self.get_queryset().filter(public_id=public_id)
+        return queryset
 
     def perform_update(self, serializer):
         account = serializer.save()
@@ -286,12 +310,13 @@ class AdminAccountViewSet(viewsets.ModelViewSet):
         else:
             account.is_active = True
             account.is_suspended = False
+            account.deleted_at = None
             subject = "Your Tarmac account access has been restored"
             body = "An administrator has restored access to your Tarmac account. You can sign in again."
             email_url = f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').rstrip('/')}/login"
             audit_action = "student_account_restored"
 
-        account.save(update_fields=("is_active", "is_suspended"))
+        account.save(update_fields=("is_active", "is_suspended", "deleted_at"))
         if not account.is_active or account.is_suspended:
             for outstanding in OutstandingToken.objects.filter(user=account):
                 BlacklistedToken.objects.get_or_create(token=outstanding)
@@ -342,7 +367,20 @@ class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
         raise MethodNotAllowed("POST", detail="Profile change requests can only be created by students.")
 
     def get_queryset(self):
-        return ProfileChangeRequest.objects.select_related("user", "reviewed_by").prefetch_related("messages__sender").all()
+        return ProfileChangeRequest.objects.select_related("user", "user__anonymous_marketplace_identity", "reviewed_by").prefetch_related("messages__sender").all()
+
+    search_fields = ["user__email", "user__username", "user__first_name", "user__last_name", "user__anonymous_marketplace_identity__handle"]
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        term = str(self.request.query_params.get("search", "")).strip()
+        if term:
+            try:
+                public_id = UUID(term)
+            except (ValueError, TypeError, AttributeError):
+                return queryset
+            return queryset | self.get_queryset().filter(user__public_id=public_id)
+        return queryset
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -528,6 +566,23 @@ def dashboard(request):
             "open_job_reports": JobReport.objects.filter(status__in=(JobReport.Status.OPEN, JobReport.Status.REVIEWING)).count(),
             "waiting_advertisers": AdWaitlistEntry.objects.filter(status=AdWaitlistEntry.Status.WAITING).count(),
         },
+    })
+
+
+@api_view(["GET"])
+@drf_permission_classes([IsModeratorOrAbove])
+def queue_counts(request):
+    """Small navigation badge payload; avoids fetching full admin dashboard data."""
+    return Response({
+        "verification": StudentVerification.objects.filter(status=StudentVerification.Status.PENDING).count(),
+        "profile_changes": ProfileChangeRequest.objects.filter(status=ProfileChangeRequest.Status.PENDING).count(),
+        "marketplace": Product.objects.filter(status=Product.Status.PENDING_REVIEW).count(),
+        "jobs": JobListing.objects.filter(status=JobListing.Status.PENDING_REVIEW).count() + JobReport.objects.filter(status__in=(JobReport.Status.OPEN, JobReport.Status.REVIEWING)).count(),
+        "lost_found": ItemClaim.objects.filter(status=ItemClaim.Status.PENDING).count() + ItemMatch.objects.filter(is_reviewed=False, is_dismissed=False).count(),
+        "reports": UserReport.objects.filter(is_resolved=False).count(),
+        "reviews": SellerReview.objects.filter(status=SellerReview.Status.PENDING).count() + ReviewReport.objects.filter(status__in=(ReviewReport.Status.OPEN, ReviewReport.Status.REVIEWING)).count(),
+        "ads": AdCampaign.objects.filter(status=AdCampaign.Status.PENDING_REVIEW).count() + AdWaitlistEntry.objects.filter(status=AdWaitlistEntry.Status.WAITING).count(),
+        "support": SupportTicket.objects.filter(status__in=(SupportTicket.Status.OPEN, SupportTicket.Status.IN_PROGRESS)).count(),
     })
 
 @api_view(["GET"])

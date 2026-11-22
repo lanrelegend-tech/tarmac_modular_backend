@@ -148,9 +148,12 @@ class AdminVerificationSerializer(serializers.ModelSerializer):
     student_level = serializers.CharField(source="user.level", read_only=True)
     student_course_name = serializers.CharField(source="user.course.name", read_only=True, allow_null=True)
     student_entry_year = serializers.IntegerField(source="user.entry_year", read_only=True, allow_null=True)
+    student_public_id = serializers.UUIDField(source="user.public_id", read_only=True)
+    student_username = serializers.CharField(source="user.username", read_only=True)
+    student_anonymous_handle = serializers.SerializerMethodField()
     class Meta:
         model = StudentVerification
-        fields = ("id", "user", "student_email", "student_name", "submitted_matric_number", "requested_affiliation", "student_department", "student_faculty", "student_level", "student_course_name", "student_entry_year", "student_profile_picture_url", "student_id_image_url", "status", "reviewer_note", "created_at", "reviewed_by", "reviewed_at")
+        fields = ("id", "user", "student_public_id", "student_username", "student_anonymous_handle", "student_email", "student_name", "submitted_matric_number", "requested_affiliation", "student_department", "student_faculty", "student_level", "student_course_name", "student_entry_year", "student_profile_picture_url", "student_id_image_url", "status", "reviewer_note", "created_at", "reviewed_by", "reviewed_at")
         read_only_fields = ("id", "user", "submitted_matric_number", "student_id_image_url", "created_at", "reviewed_by", "reviewed_at")
 
     def get_student_id_image_url(self, obj):
@@ -169,6 +172,10 @@ class AdminVerificationSerializer(serializers.ModelSerializer):
 
     def get_student_name(self, obj):
         return obj.user.get_full_name().strip() or obj.user.username
+
+    def get_student_anonymous_handle(self, obj):
+        identity = getattr(obj.user, "anonymous_marketplace_identity", None)
+        return identity.handle if identity else None
 
     def validate_status(self, status):
         if status not in (StudentVerification.Status.APPROVED, StudentVerification.Status.REJECTED):
@@ -231,11 +238,12 @@ class AdminAccountSerializer(serializers.ModelSerializer):
     student_status = serializers.CharField(read_only=True)
     profile_picture_url = serializers.SerializerMethodField()
     anonymous_identity_handle = serializers.SerializerMethodField()
+    anonymous_identity_public_id = serializers.SerializerMethodField()
     anonymous_identity_enabled = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "student_status_override", "campus", "profile_picture_url", "anonymous_identity_handle", "anonymous_identity_enabled", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
-        read_only_fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course_name", "student_status", "student_status_override", "campus", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
+        fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "student_status_override", "campus", "profile_picture_url", "anonymous_identity_handle", "anonymous_identity_public_id", "anonymous_identity_enabled", "role", "is_active", "is_suspended", "deleted_at", "is_student_verified", "email_verified", "date_joined")
+        read_only_fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course_name", "student_status", "student_status_override", "campus", "role", "is_active", "is_suspended", "deleted_at", "is_student_verified", "email_verified", "date_joined")
 
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
@@ -247,6 +255,10 @@ class AdminAccountSerializer(serializers.ModelSerializer):
     def get_anonymous_identity_handle(self, obj):
         identity = getattr(obj, "anonymous_marketplace_identity", None)
         return identity.handle if identity else None
+
+    def get_anonymous_identity_public_id(self, obj):
+        identity = getattr(obj, "anonymous_marketplace_identity", None)
+        return str(identity.public_id) if identity else None
 
     def get_anonymous_identity_enabled(self, obj):
         identity = getattr(obj, "anonymous_marketplace_identity", None)

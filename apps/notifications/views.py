@@ -7,7 +7,10 @@ from .serializers import NotificationSerializer
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class=NotificationSerializer; permission_classes=[IsVerifiedStudent]
     http_method_names = ["get", "post", "delete", "head", "options"]
-    def get_queryset(self): return Notification.objects.filter(user=self.request.user)
+    def get_queryset(self): return Notification.objects.filter(user=self.request.user, channel=Notification.Channel.IN_APP)
+    @action(detail=False, methods=["get"], url_path="unread-count")
+    def unread_count(self, request):
+        return Response({"count": self.get_queryset().filter(is_read=False).count()})
     def destroy(self, request, *args, **kwargs):
         notification = self.get_object()
         notification.delete()

@@ -44,12 +44,22 @@ def issue_account_action_token(user, purpose):
         token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
         expires_at=now + lifetime,
     )
-    path = os.getenv("EMAIL_VERIFICATION_URL" if purpose == AccountActionToken.Purpose.EMAIL_VERIFY else "PASSWORD_RESET_URL", "")
+    purpose_settings = {
+        AccountActionToken.Purpose.EMAIL_VERIFY: ("EMAIL_VERIFICATION_URL", "verify-email"),
+        AccountActionToken.Purpose.PASSWORD_RESET: ("PASSWORD_RESET_URL", "reset-password"),
+        AccountActionToken.Purpose.ACCOUNT_DELETE: ("ACCOUNT_DELETE_URL", "delete-account"),
+    }
+    environment_key, default_page = purpose_settings.get(purpose, ("PASSWORD_RESET_URL", "reset-password"))
+    path = os.getenv(environment_key, "")
     if not path:
-        path = f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000')}/{'verify-email' if purpose == AccountActionToken.Purpose.EMAIL_VERIFY else 'reset-password'}"
+        path = f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').rstrip('/')}/{default_page}"
     link = f"{path}?{urlencode({'email': user.email, 'token': raw_token})}"
-    subject = "Verify your Tarmac email" if purpose == AccountActionToken.Purpose.EMAIL_VERIFY else "Reset your Tarmac password"
-    action = "verify your email address" if purpose == AccountActionToken.Purpose.EMAIL_VERIFY else "reset your password"
+    messages = {
+        AccountActionToken.Purpose.EMAIL_VERIFY: ("Verify your Tarmac email", "verify your email address", "Verify email"),
+        AccountActionToken.Purpose.PASSWORD_RESET: ("Reset your Tarmac password", "reset your password", "Reset password"),
+        AccountActionToken.Purpose.ACCOUNT_DELETE: ("Confirm deletion of your Tarmac account", "confirm deletion of your Tarmac account", "Confirm account deletion"),
+    }
+    subject, action, action_label = messages.get(purpose, messages[AccountActionToken.Purpose.PASSWORD_RESET])
     try:
         text_body = f"Hi {user.first_name or user.username},\n\nUse the button below to {action}. This secure link expires in {int(lifetime.total_seconds() // 3600)} hour(s).\n\nIf you did not request this, ignore this email.\n\n{link}"
         send_tarmac_email(
@@ -58,7 +68,7 @@ def issue_account_action_token(user, purpose):
             recipient=user.email,
             recipient_name=user.first_name or user.username,
             action_url=link,
-            action_label="Verify email" if purpose == AccountActionToken.Purpose.EMAIL_VERIFY else "Reset password",
+            action_label=action_label,
             preheader=f"Use this secure link to {action}.",
         )
     except Exception:
