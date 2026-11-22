@@ -5,6 +5,7 @@ from django.db.models import Avg, Count
 from rest_framework.exceptions import ValidationError
 from rest_framework.exceptions import PermissionDenied
 from django.db.models import Q
+from uuid import UUID
 from apps.accounts.models import User, AnonymousMarketplaceIdentity
 from apps.administration.models import PlatformSettings
 
@@ -29,16 +30,28 @@ class SellerReviewViewSet(
             return SellerReview.objects.none()
         queryset = SellerReview.objects.select_related("reviewer", "seller", "anonymous_identity", "conversation", "job_engagement")
         identity_id = self.request.query_params.get("identity")
+        if identity_id and identity_id.lower() in ("undefined", "null"):
+            return SellerReview.objects.none()
+        if identity_id:
+            try:
+                identity_id = str(UUID(identity_id))
+            except (ValueError, TypeError, AttributeError):
+                return SellerReview.objects.none()
         mine = self.request.query_params.get("mine") == "true"
         if mine:
             return queryset.filter(reviewer=self.request.user)
+        visible_anonymous = Q(identity_type="anonymous", anonymous_identity__is_enabled=True)
+        if self.request.user.is_authenticated:
+            visible_anonymous |= Q(identity_type="anonymous", seller=self.request.user, anonymous_identity__user=self.request.user)
         queryset = queryset.filter(status=SellerReview.Status.APPROVED).filter(
             Q(identity_type="normal", seller__public_profile_enabled=True, seller__is_active=True, seller__is_suspended=False, seller__is_student_verified=True)
-            | Q(identity_type="anonymous", anonymous_identity__is_enabled=True, seller__is_active=True, seller__is_suspended=False, seller__is_student_verified=True)
+            | (visible_anonymous & Q(seller__is_active=True, seller__is_suspended=False, seller__is_student_verified=True))
         )
         if identity_id:
             normal_identity = User.objects.filter(public_id=identity_id, public_profile_enabled=True, is_active=True, is_suspended=False, is_student_verified=True).first()
-            anonymous_identity = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=identity_id, is_enabled=True, user__is_active=True, user__is_suspended=False, user__is_student_verified=True).first()
+            anonymous_identity = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=identity_id, user__is_active=True, user__is_suspended=False, user__is_student_verified=True).first()
+            if anonymous_identity and not anonymous_identity.is_enabled and anonymous_identity.user_id != self.request.user.pk:
+                anonymous_identity = None
             if not normal_identity and not anonymous_identity:
                 return SellerReview.objects.none()
             queryset = queryset.filter(identity_public_id=identity_id)
@@ -59,8 +72,14 @@ class SellerReviewViewSet(
         if not PlatformSettings.get_solo().reviews_enabled:
             raise PermissionDenied("Reviews are currently disabled by the school.")
         identity_id = request.query_params.get("identity", "")
+        try:
+            identity_id = str(UUID(identity_id))
+        except (ValueError, TypeError, AttributeError):
+            raise ValidationError({"identity": "Choose an available public profile."})
         user = User.objects.filter(public_id=identity_id, public_profile_enabled=True, is_active=True, is_suspended=False).first()
-        alias = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=identity_id, is_enabled=True, user__is_active=True, user__is_suspended=False).first()
+        alias = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=identity_id, user__is_active=True, user__is_suspended=False).first()
+        if alias and not alias.is_enabled and alias.user_id != request.user.pk:
+            alias = None
         if (not user or not is_student_feature_eligible(user)) and (not alias or not is_student_feature_eligible(alias.user)):
             raise ValidationError({"identity": "Choose an available public profile."})
         if user and is_student_feature_eligible(user):

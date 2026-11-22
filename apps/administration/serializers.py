@@ -41,7 +41,7 @@ class UserReportSerializer(serializers.ModelSerializer):
         return images
 
     def validate(self, attrs):
-        if self.instance is None and not any(attrs.get(key) for key in ("reported_user", "product", "lost_found_report", "conversation")):
+        if self.instance is None and not any(attrs.get(key) for key in ("reported_user", "product", "lost_found_report", "conversation", "target_identity")):
             raise serializers.ValidationError("Choose the student, listing, or lost-and-found post to report.")
         request = self.context["request"]
         if request.user.is_staff:
@@ -230,10 +230,12 @@ class AdminAccountSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source="course.name", read_only=True, allow_null=True)
     student_status = serializers.CharField(read_only=True)
     profile_picture_url = serializers.SerializerMethodField()
+    anonymous_identity_handle = serializers.SerializerMethodField()
+    anonymous_identity_enabled = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "student_status_override", "campus", "profile_picture_url", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
-        read_only_fields = ("id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course_name", "student_status", "student_status_override", "campus", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
+        fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "student_status_override", "campus", "profile_picture_url", "anonymous_identity_handle", "anonymous_identity_enabled", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
+        read_only_fields = ("id", "public_id", "email", "username", "first_name", "last_name", "matric_number", "phone_number", "department", "faculty", "level", "course_name", "student_status", "student_status_override", "campus", "role", "is_active", "is_suspended", "is_student_verified", "email_verified", "date_joined")
 
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
@@ -241,6 +243,14 @@ class AdminAccountSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         path = f"/api/accounts/profile-image/{obj.public_id}/"
         return request.build_absolute_uri(path) if request else path
+
+    def get_anonymous_identity_handle(self, obj):
+        identity = getattr(obj, "anonymous_marketplace_identity", None)
+        return identity.handle if identity else None
+
+    def get_anonymous_identity_enabled(self, obj):
+        identity = getattr(obj, "anonymous_marketplace_identity", None)
+        return bool(identity and identity.is_enabled)
 
     def validate(self, attrs):
         course = attrs.get("course", getattr(self.instance, "course", None))
@@ -347,9 +357,10 @@ class SupportAttachmentSerializer(serializers.ModelSerializer):
 class SupportMessageSerializer(serializers.ModelSerializer):
     attachments = SupportAttachmentSerializer(many=True, read_only=True)
     sender_name = serializers.SerializerMethodField()
+    sender_is_admin = serializers.BooleanField(source="sender.is_staff", read_only=True)
     class Meta:
         model = SupportMessage
-        fields = ("id", "sender", "sender_name", "body", "attachments", "created_at")
+        fields = ("id", "sender", "sender_name", "sender_is_admin", "body", "attachments", "created_at")
         read_only_fields = fields
     def get_sender_name(self, obj):
         return obj.sender.get_full_name().strip() or obj.sender.username

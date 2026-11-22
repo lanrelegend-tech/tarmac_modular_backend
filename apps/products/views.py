@@ -6,6 +6,8 @@ from rest_framework.exceptions import ValidationError
 from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import viewsets, permissions
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.response import Response
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.models import PlatformSettings, AdminLog
 from apps.administration.permissions import IsAdminOrAbove, PlatformFeatureEnabled
@@ -44,8 +46,14 @@ class CategoryViewSet(viewsets.ModelViewSet):
         instance.delete()
         AdminLog.objects.create(actor=self.request.user, action="category_deleted", target_type="Category", target_id=str(category_id), metadata={"name": category_name})
 
+class ProductPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = "page_size"
+    max_page_size = 50
+
 class ProductViewSet(viewsets.ModelViewSet):
     platform_feature = "marketplace_enabled"
+    pagination_class = ProductPagination
     serializer_class=ProductSerializer; permission_classes=[VerifiedStudentOrReadOnly, PlatformFeatureEnabled]; filterset_fields=["category","condition","status"]; search_fields=["title","description","location"]; ordering_fields=["price","created_at"]
     def get_queryset(self):
         qs=Product.objects.select_related("seller","seller__course","category","anonymous_identity").prefetch_related("images")
@@ -57,7 +65,9 @@ class ProductViewSet(viewsets.ModelViewSet):
             seller_access &= Q(seller__is_student_verified=True)
         valid_identity = Q(identity_type=Product.IdentityType.NORMAL) | Q(anonymous_identity__is_enabled=True)
         available = qs.filter(status=Product.Status.ACTIVE, visibility=Product.Visibility.PUBLIC, seller__is_active=True, seller__is_suspended=False, category__is_active=True, category__is_allowed_for_sale=True).filter(valid_identity, seller_access).filter(Q(expires_at__isnull=True)|Q(expires_at__gt=timezone.now()))
-        invite_only = qs.filter(status=Product.Status.ACTIVE, visibility=Product.Visibility.INVITE_ONLY, audience_grants__user=self.request.user, seller__is_active=True, seller__is_suspended=False, category__is_active=True, category__is_allowed_for_sale=True).filter(valid_identity, seller_access).filter(Q(expires_at__isnull=True)|Q(expires_at__gt=timezone.now()))
+        invite_only = qs.none()
+        if self.request.user.is_authenticated:
+            invite_only = qs.filter(status=Product.Status.ACTIVE, visibility=Product.Visibility.INVITE_ONLY, audience_grants__user=self.request.user, seller__is_active=True, seller__is_suspended=False, category__is_active=True, category__is_allowed_for_sale=True).filter(valid_identity, seller_access).filter(Q(expires_at__isnull=True)|Q(expires_at__gt=timezone.now()))
         if self.action == "list" and self.request.query_params.get("sponsored") == "true":
             if not platform.sponsored_products_enabled or not platform.featured_products_enabled:
                 return Product.objects.none()
@@ -68,7 +78,11 @@ class ProductViewSet(viewsets.ModelViewSet):
                 return Product.objects.none()
             available = available.filter(is_featured=True).filter(Q(featured_until__isnull=True) | Q(featured_until__gt=timezone.now()))
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
-        if self.action in ("list","retrieve"): return (available | invite_only | qs.filter(seller=self.request.user)).distinct()
+        if self.action in ("list","retrieve"):
+            own_products = qs.filter(seller=self.request.user) if self.request.user.is_authenticated else qs.none()
+            return (available | invite_only | own_products).distinct()
+        if not self.request.user.is_authenticated:
+            return qs.none()
         return qs.filter(seller=self.request.user)
     def perform_create(self, serializer):
         platform = PlatformSettings.get_solo()
@@ -119,13 +133,16 @@ class ProductImageViewSet(viewsets.ModelViewSet):
         if platform.student_verification_enabled:
             seller_access &= Q(product__seller__is_student_verified=True)
         available = ProductImage.objects.filter(product__status=Product.Status.ACTIVE, product__visibility=Product.Visibility.PUBLIC, product__seller__is_active=True, product__seller__is_suspended=False, product__category__is_active=True, product__category__is_allowed_for_sale=True).filter(seller_access).filter(Q(product__identity_type=Product.IdentityType.NORMAL)|Q(product__anonymous_identity__is_enabled=True)).filter(Q(product__expires_at__isnull=True)|Q(product__expires_at__gt=timezone.now()))
-        invited = ProductImage.objects.filter(product__status=Product.Status.ACTIVE, product__visibility=Product.Visibility.INVITE_ONLY, product__audience_grants__user=self.request.user, product__seller__is_active=True, product__seller__is_suspended=False).filter(seller_access).filter(Q(product__identity_type=Product.IdentityType.NORMAL)|Q(product__anonymous_identity__is_enabled=True)).filter(Q(product__expires_at__isnull=True)|Q(product__expires_at__gt=timezone.now()))
+        invited = ProductImage.objects.none()
+        if self.request.user.is_authenticated:
+            invited = ProductImage.objects.filter(product__status=Product.Status.ACTIVE, product__visibility=Product.Visibility.INVITE_ONLY, product__audience_grants__user=self.request.user, product__seller__is_active=True, product__seller__is_suspended=False).filter(seller_access).filter(Q(product__identity_type=Product.IdentityType.NORMAL)|Q(product__anonymous_identity__is_enabled=True)).filter(Q(product__expires_at__isnull=True)|Q(product__expires_at__gt=timezone.now()))
         if self.action == "file" and not is_student_feature_eligible(self.request.user):
             if not platform.featured_products_enabled or not platform.sponsored_products_enabled:
                 return ProductImage.objects.none()
             public_featured = available.filter(product__is_featured=True).filter(Q(product__featured_until__isnull=True) | Q(product__featured_until__gt=timezone.now()))
             return public_featured
-        return available | invited | ProductImage.objects.filter(product__seller=self.request.user)
+        own_images = ProductImage.objects.filter(product__seller=self.request.user) if self.request.user.is_authenticated else ProductImage.objects.none()
+        return available | invited | own_images
     @action(detail=True, methods=["get"], url_path="file")
     def file(self, request, pk=None):
         item = self.get_object()
@@ -148,5 +165,12 @@ class ProductImageViewSet(viewsets.ModelViewSet):
 class FavouriteViewSet(viewsets.ModelViewSet):
     platform_feature = "marketplace_enabled"
     serializer_class=FavouriteSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
-    def get_queryset(self): return Favourite.objects.filter(user=self.request.user)
+    def get_queryset(self):
+        queryset = Favourite.objects.filter(user=self.request.user)
+        product_id = self.request.query_params.get("product")
+        if product_id:
+            if not product_id.isdigit():
+                return queryset.none()
+            queryset = queryset.filter(product_id=product_id)
+        return queryset
     def perform_create(self, serializer): serializer.save(user=self.request.user)

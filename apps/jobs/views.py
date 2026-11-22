@@ -112,11 +112,14 @@ class JobListingViewSet(viewsets.ModelViewSet):
         kind = self.request.query_params.get("kind")
         category = self.request.query_params.get("category")
         engagement = self.request.query_params.get("engagement")
+        service_intent = self.request.query_params.get("service_intent")
         location = self.request.query_params.get("location")
         pay_min = self.request.query_params.get("pay_min")
         pay_max = self.request.query_params.get("pay_max")
         if kind in JobListing.Kind.values:
             qs = qs.filter(kind=kind)
+        if service_intent in JobListing.ServiceIntent.values:
+            qs = qs.filter(kind=JobListing.Kind.SERVICE, service_intent=service_intent)
         if category and category.isdigit():
             qs = qs.filter(category_id=int(category))
         if engagement in JobListing.Engagement.values:

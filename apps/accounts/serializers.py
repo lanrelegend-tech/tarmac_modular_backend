@@ -6,6 +6,16 @@ from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from .models import User, StudentVerification, AccountActionToken, ProfileChangeRequest, ProfileChangeMessage, CourseProgram, AnonymousMarketplaceIdentity
 
+
+def normalize_whatsapp_number(value):
+    number = re.sub(r"[\s()\-]", "", str(value or "").strip())
+    digits = number.lstrip("+")
+    if re.fullmatch(r"0\d{10}", digits):
+        return "+234" + digits[1:]
+    if re.fullmatch(r"234\d{10}", digits):
+        return "+" + digits
+    return number
+
 class CourseProgramSerializer(serializers.ModelSerializer):
     class Meta:
         model = CourseProgram
@@ -21,13 +31,14 @@ class CourseProgramSerializer(serializers.ModelSerializer):
         return value
 
 class UserSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(source="public_id", read_only=True)
     profile_picture_url = serializers.SerializerMethodField()
     can_access_student_features = serializers.SerializerMethodField()
     course_name = serializers.CharField(source="course.name", read_only=True, allow_null=True)
     student_status = serializers.CharField(read_only=True)
     class Meta:
         model = User
-        fields = ("id", "username", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
+        fields = ("id", "public_id", "username", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
         read_only_fields = fields
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
@@ -88,12 +99,13 @@ class AnonymousMarketplaceIdentitySerializer(serializers.ModelSerializer):
         raise serializers.ValidationError("Could not create a unique marketplace identity. Try again.")
 
 class RegisterSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(source="public_id", read_only=True)
     password=serializers.CharField(write_only=True, min_length=8)
     matric_number=serializers.CharField(required=True, max_length=40)
     phone_number=serializers.CharField(required=True, max_length=25)
     course=serializers.PrimaryKeyRelatedField(queryset=CourseProgram.objects.filter(is_active=True), required=True)
     entry_year=serializers.IntegerField(required=True, min_value=2000)
-    class Meta: model=User; fields=("id","username","first_name","last_name","email","matric_number","phone_number","password","department","faculty","level","course","entry_year")
+    class Meta: model=User; fields=("id","public_id","username","first_name","last_name","email","matric_number","phone_number","password","department","faculty","level","course","entry_year"); read_only_fields=("id","public_id")
     def validate_email(self, value):
         value = value.strip().lower()
         if User.objects.filter(email__iexact=value).exists():
@@ -284,7 +296,16 @@ class StudentProfileChangeRequestSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"matric_number": "This matriculation number is already linked to another account."})
             if user.matric_number and new_matric.casefold() == user.matric_number.casefold():
                 new_matric = None
-        changes = {key: value for key, value in changes.items() if str(value).strip() != str(getattr(user, key, "")).strip()}
+        if "whatsapp_number" in changes:
+            changes["whatsapp_number"] = normalize_whatsapp_number(changes["whatsapp_number"])
+        unchanged = set()
+        for key, value in changes.items():
+            current_value = getattr(user, key, "")
+            if key == "whatsapp_number":
+                current_value = normalize_whatsapp_number(current_value)
+            if str(value).strip() == str(current_value).strip():
+                unchanged.add(key)
+        changes = {key: value for key, value in changes.items() if key not in unchanged}
         if not changes:
             special_changes = {}
             if new_email is not None: special_changes["email"] = new_email

@@ -26,6 +26,10 @@ class JobListing(models.Model):
         JOB = "job", "Job or internship"
         SERVICE = "service", "Gig or service"
 
+    class ServiceIntent(models.TextChoices):
+        OFFER = "offer", "Offering a service"
+        REQUEST = "request", "Looking for a service"
+
     class Engagement(models.TextChoices):
         PART_TIME = "part_time", "Part-time"
         FULL_TIME = "full_time", "Full-time"
@@ -56,6 +60,7 @@ class JobListing(models.Model):
     identity_type = models.CharField(max_length=12, choices=(("normal", "Normal profile"), ("anonymous", "Anonymous marketplace identity")), default="normal", db_index=True)
     anonymous_identity = models.ForeignKey("accounts.AnonymousMarketplaceIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="job_listings")
     kind = models.CharField(max_length=12, choices=Kind.choices, default=Kind.JOB)
+    service_intent = models.CharField(max_length=8, choices=ServiceIntent.choices, default=ServiceIntent.OFFER, db_index=True)
     engagement = models.CharField(max_length=16, choices=Engagement.choices, default=Engagement.PART_TIME)
     category = models.ForeignKey(JobCategory, on_delete=models.PROTECT, related_name="listings")
     title = models.CharField(max_length=180)

@@ -94,7 +94,7 @@ Signed-in users send a throttled presence heartbeat to `POST /api/accounts/prese
 
 Create a Django superuser for platform controls. Under Platform settings, a superuser can disable the whole site, switch marketplace, lost-and-found, messaging, or ads on and off, and set Paystack plus listing/ad fees. Disabling a fee or Paystack makes new listings/campaigns free while retaining school moderation. Admin staff can review student accounts, listings, ads, lost-and-found reports and matches, payments, and user reports. Publish school announcements to verified students or a department; users receive a popup-ready in-app notification record.
 
-Run `python manage.py seed_categories` once to add the default marketplace categories.
+Marketplace categories are managed by administrators under Admin → Categories. Only active categories allowed for sale appear in the student Marketplace browse filters and listing form. Existing category records remain in the database until an administrator edits, deactivates, or deletes them.
 
 ## Jobs & Gigs
 

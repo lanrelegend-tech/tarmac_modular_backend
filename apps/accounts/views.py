@@ -118,7 +118,10 @@ def public_marketplace_identity(request, public_id):
     from apps.products.models import Product
     from apps.jobs.models import JobListing
     from apps.reviews.models import SellerReview
-    identity = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=public_id, is_enabled=True, user__is_active=True, user__is_suspended=False, user__is_student_verified=True).first()
+    identity = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=public_id, user__is_active=True, user__is_suspended=False, user__is_student_verified=True).first()
+    is_owner = bool(identity and identity.user_id == request.user.pk)
+    if identity and not identity.is_enabled and not is_owner:
+        identity = None
     if not identity:
         from rest_framework.exceptions import NotFound
         raise NotFound("This anonymous marketplace identity is unavailable.")
@@ -129,7 +132,7 @@ def public_marketplace_identity(request, public_id):
     from apps.reviews.serializers import SellerReviewSerializer
     jobs = JobListing.objects.filter(owner=user, anonymous_identity=identity, identity_type="anonymous", source=JobListing.Source.STUDENT, status=JobListing.Status.ACTIVE, deadline__gte=timezone.localdate(), category__is_active=True).select_related("category", "anonymous_identity")
     from apps.jobs.serializers import JobListingSerializer
-    return Response({"public_id": str(identity.public_id), "handle": identity.handle, "is_student_verified": user.is_student_verified, "student_status": user.student_status, "last_seen_at": user.last_seen_at, "products": ProductSerializer(products, many=True, context={"request": request}).data, "jobs": JobListingSerializer(jobs, many=True, context={"request": request}).data, "reviews": SellerReviewSerializer(reviews, many=True, context={"request": request}).data})
+    return Response({"public_id": str(identity.public_id), "handle": identity.handle, "is_enabled": identity.is_enabled, "is_owner": is_owner, "is_student_verified": user.is_student_verified, "student_status": user.student_status, "last_seen_at": user.last_seen_at, "products": ProductSerializer(products, many=True, context={"request": request}).data, "jobs": JobListingSerializer(jobs, many=True, context={"request": request}).data, "reviews": SellerReviewSerializer(reviews, many=True, context={"request": request}).data})
 
 @api_view(["GET"])
 @permission_classes([IsVerifiedStudent])
@@ -140,7 +143,7 @@ def student_directory(request):
     from django.db.models import Q
     from .permissions import is_student_feature_eligible
     candidates = User.objects.filter(is_active=True, is_suspended=False, is_student_verified=True).filter(Q(username__icontains=query) | Q(first_name__icontains=query) | Q(last_name__icontains=query)).exclude(pk=request.user.pk).order_by("username")[:30]
-    results = [{"public_id": str(user.public_id), "display_name": (user.get_full_name().strip() if user.public_name_enabled else "") or user.username, "student_status": user.student_status} for user in candidates if is_student_feature_eligible(user)]
+    results = [{"public_id": str(user.public_id), "username": user.username, "display_name": (user.get_full_name().strip() if user.public_name_enabled else "") or user.username, "student_status": user.student_status} for user in candidates if is_student_feature_eligible(user)]
     return Response(results)
 @api_view(["GET", "PATCH"])
 @permission_classes([permissions.IsAuthenticated])

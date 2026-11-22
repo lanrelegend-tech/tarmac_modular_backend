@@ -5,7 +5,10 @@ from django.core.files.storage import FileSystemStorage
 from django.utils.deconstruct import deconstructible
 from django.utils import timezone
 from uuid import uuid4
+import logging
 from config.storage import PrivateCloudinaryImageStorage
+
+logger = logging.getLogger(__name__)
 
 
 def default_notification_channels():
@@ -127,11 +130,22 @@ Marketplace listings, reviews and messages are visible to the people who use tho
 
     @classmethod
     def get_solo(cls):
-        settings_obj = cache.get("tarmac.platform_settings")
+        try:
+            settings_obj = cache.get("tarmac.platform_settings")
+        except Exception:
+            # Settings are authoritative in the database. Keep API requests
+            # working when the optional shared cache is temporarily unavailable.
+            logger.exception("Could not read platform settings from cache; falling back to the database.")
+            settings_obj = None
         if settings_obj is None:
             from django.conf import settings as django_settings
             settings_obj = cls.objects.filter(pk=1).first() or cls(pk=1, paystack_enabled=django_settings.PAYSTACK_ENABLED_DEFAULT)
-            cache.set("tarmac.platform_settings", settings_obj, 10)
+            # Admin saves explicitly invalidate this key; a longer fallback TTL
+            # avoids repeatedly loading settings from the external cache/database.
+            try:
+                cache.set("tarmac.platform_settings", settings_obj, 300)
+            except Exception:
+                logger.exception("Could not cache platform settings; continuing with the database value.")
         return settings_obj
 
     def __str__(self):

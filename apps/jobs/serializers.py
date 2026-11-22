@@ -25,7 +25,7 @@ class JobListingSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobListing
         fields = (
-            "id", "source", "kind", "engagement", "category", "category_name", "title",
+            "id", "source", "kind", "service_intent", "engagement", "category", "category_name", "title",
             "description", "requirements", "pay_type", "pay_min", "pay_max", "location",
             "working_hours", "duration", "positions", "deadline", "application_instructions",
             "application_url", "business_name", "identity_type", "poster_public_id", "poster_name", "poster_status",
@@ -83,6 +83,8 @@ class JobListingSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         category = attrs.get("category", getattr(self.instance, "category", None))
         kind = attrs.get("kind", getattr(self.instance, "kind", JobListing.Kind.JOB))
+        if kind == JobListing.Kind.JOB:
+            attrs["service_intent"] = JobListing.ServiceIntent.OFFER
         if category and category.category_type != ("service" if kind == JobListing.Kind.SERVICE else "job"):
             raise serializers.ValidationError({"category": "Choose a category that matches this listing type."})
         pay_min = attrs.get("pay_min", getattr(self.instance, "pay_min", None))
@@ -147,7 +149,7 @@ class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobListing
         fields = (
-            "kind", "engagement", "category", "title", "description", "requirements", "pay_type",
+            "kind", "service_intent", "engagement", "category", "title", "description", "requirements", "pay_type",
             "pay_min", "pay_max", "location", "working_hours", "duration", "positions", "deadline",
             "application_instructions", "application_url", "business_name", "business_contact_name",
             "business_email", "business_phone", "business_website", "business_description",
@@ -170,6 +172,8 @@ class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        if attrs["kind"] == JobListing.Kind.JOB:
+            attrs["service_intent"] = JobListing.ServiceIntent.OFFER
         if attrs["category"].category_type != ("service" if attrs["kind"] == JobListing.Kind.SERVICE else "job"):
             raise serializers.ValidationError({"category": "Choose a category that matches this opportunity type."})
         pay_min, pay_max = attrs.get("pay_min"), attrs.get("pay_max")
@@ -208,7 +212,7 @@ class AdminJobListingSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobListing
         fields = (
-            "id", "source", "owner", "owner_email", "identity_type", "anonymous_identity", "anonymous_identity_name", "kind", "engagement", "category", "category_name",
+            "id", "source", "owner", "owner_email", "identity_type", "anonymous_identity", "anonymous_identity_name", "kind", "service_intent", "engagement", "category", "category_name",
             "title", "description", "requirements", "pay_type", "pay_min", "pay_max", "location",
             "working_hours", "duration", "positions", "deadline", "application_instructions", "application_url",
             "business_name", "business_contact_name", "business_email", "business_phone", "business_website",
