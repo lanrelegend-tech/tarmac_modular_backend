@@ -10,7 +10,7 @@ from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import viewsets,permissions, status, generics
 from rest_framework.decorators import action, api_view, permission_classes as drf_permission_classes
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import MethodNotAllowed, ValidationError
 from rest_framework.response import Response
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from django.db import models
@@ -335,8 +335,11 @@ class AdminAccountViewSet(viewsets.ModelViewSet):
 class AdminProfileChangeRequestViewSet(viewsets.ModelViewSet):
     serializer_class = AdminProfileChangeRequestSerializer
     permission_classes = [IsAdminOrAbove]
-    http_method_names = ["get", "patch", "head", "options"]
+    http_method_names = ["get", "post", "patch", "head", "options"]
     filterset_fields = ["status"]
+
+    def create(self, request, *args, **kwargs):
+        raise MethodNotAllowed("POST", detail="Profile change requests can only be created by students.")
 
     def get_queryset(self):
         return ProfileChangeRequest.objects.select_related("user", "reviewed_by").prefetch_related("messages__sender").all()
