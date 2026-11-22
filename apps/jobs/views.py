@@ -9,7 +9,7 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -451,9 +451,12 @@ class AdminJobListingViewSet(viewsets.ModelViewSet):
     queryset = JobListing.objects.select_related("owner", "category", "reviewed_by").all()
     serializer_class = AdminJobListingSerializer
     permission_classes = (IsModeratorOrAbove,)
-    http_method_names = ("get", "patch", "head", "options")
+    http_method_names = ("get", "post", "patch", "head", "options")
     search_fields = ("title", "business_name", "business_email", "owner__email")
     filterset_fields = ("source", "kind", "status")
+
+    def create(self, request, *args, **kwargs):
+        raise MethodNotAllowed("POST", detail="Listings are submitted by students or through the external business submission form.")
 
     @action(detail=True, methods=("post",))
     @transaction.atomic
@@ -486,10 +489,13 @@ class AdminJobListingViewSet(viewsets.ModelViewSet):
         listing = self.get_object()
         if listing.status != JobListing.Status.PENDING_REVIEW:
             raise ValidationError({"status": "Only listings pending review can be rejected."})
+        admin_note = str(request.data.get("admin_note", "")).strip()[:3000]
+        if len(admin_note) < 5:
+            raise ValidationError({"admin_note": "Give the student or business a clear reason (at least 5 characters)."})
         listing.status = JobListing.Status.REJECTED
         listing.reviewed_by = request.user
         listing.reviewed_at = timezone.now()
-        listing.admin_note = str(request.data.get("admin_note", "")).strip()[:3000]
+        listing.admin_note = admin_note
         listing.save(update_fields=("status", "reviewed_by", "reviewed_at", "admin_note", "updated_at"))
         AdminLog.objects.create(actor=request.user, action="job_listing_rejected", target_type="JobListing", target_id=str(listing.pk), metadata={"source": listing.source, "note": listing.admin_note})
         if listing.source == JobListing.Source.BUSINESS:
@@ -501,12 +507,23 @@ class AdminJobListingViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=("post",))
     def remove(self, request, pk=None):
         listing = self.get_object()
+        admin_note = str(request.data.get("admin_note", "")).strip()[:3000]
+        if len(admin_note) < 5:
+            raise ValidationError({"admin_note": "Give a clear reason for removing this listing (at least 5 characters)."})
         listing.status = JobListing.Status.REMOVED
         listing.closed_at = timezone.now()
         listing.management_token_revoked_at = timezone.now() if listing.source == JobListing.Source.BUSINESS else None
-        listing.admin_note = str(request.data.get("admin_note", listing.admin_note)).strip()[:3000]
+        listing.admin_note = admin_note
         listing.save(update_fields=("status", "closed_at", "management_token_revoked_at", "admin_note", "updated_at"))
         AdminLog.objects.create(actor=request.user, action="job_listing_removed", target_type="JobListing", target_id=str(listing.pk), metadata={"source": listing.source})
+        if listing.source == JobListing.Source.BUSINESS and listing.business_email_verified_at:
+            _send_external_email(
+                subject="Your Tarmac job opportunity was removed",
+                body=f"The KWASU team removed your opportunity, {listing.title}. Reason: {listing.admin_note}",
+                recipient=listing.business_email,
+            )
+        elif listing.owner_id:
+            notify_user(listing.owner, "Your Jobs & Gigs listing was removed", listing.admin_note, {"kind": "job_listing_review", "listing_id": listing.pk, "status": listing.status}, f"job-removed:{listing.pk}")
         return Response(self.get_serializer(listing).data)
 
     @action(detail=True, methods=("post",), url_path="rotate-management-link")
