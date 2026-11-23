@@ -9,5 +9,8 @@ python-dotenv>=1.0
 requests>=2.32
 cloudinary>=1.47,<2.0
 redis>=5.0,<7.0
+pywebpush>=2.0,<3.0
 gunicorn>=23.0
 whitenoise>=6.9
+
+pywebpush>=2.0,<3.0

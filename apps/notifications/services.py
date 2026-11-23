@@ -95,6 +95,7 @@ def send_official_match_message(match, user, report_title, confirmed=False):
 
 def notify_user(user, subject, body, data, event_key, *, dispatch_email=False, force_email=False):
     queue_notification(user, Notification.Channel.IN_APP, subject, body, data, f"{event_key}:in_app")
+    transaction.on_commit(lambda: send_web_push(user.pk, subject, body, data, event_key))
     from apps.administration.models import PlatformSettings
     platform = PlatformSettings.get_solo()
     kind = (data or {}).get("kind", "")
@@ -297,3 +298,34 @@ def dispatch_notification(notification_id):
                 notification.next_attempt_at = timezone.now() + timedelta(minutes=RETRY_MINUTES[notification.attempts - 1])
             logger.exception("Notification delivery failed for notification %s", notification.pk)
         notification.save(update_fields=("attempts", "is_sent", "last_error", "next_attempt_at"))
+
+
+def send_web_push(user_id, subject, body, data=None, event_key=""):
+    """Deliver branded browser push to subscriptions that the student opted into."""
+    from django.conf import settings
+    from .models import PushSubscription
+    if not (getattr(settings, "WEB_PUSH_PUBLIC_KEY", "") and getattr(settings, "WEB_PUSH_PRIVATE_KEY", "")):
+        return
+    try:
+        from pywebpush import WebPushException, webpush
+        import json
+    except ImportError:
+        return
+    payload_data = data or {}
+    url = payload_data.get("link") or "/notifications"
+    payload = json.dumps({"title": subject or "Tarmac", "body": body, "url": url, "tag": event_key or "tarmac-update"})
+    for subscription in PushSubscription.objects.filter(user_id=user_id).iterator():
+        try:
+            webpush(
+                subscription_info={"endpoint": subscription.endpoint, "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth}},
+                data=payload,
+                vapid_private_key=settings.WEB_PUSH_PRIVATE_KEY,
+                vapid_claims={"sub": settings.WEB_PUSH_CLAIMS_EMAIL},
+                ttl=60 * 60 * 24,
+            )
+        except WebPushException as error:
+            if getattr(getattr(error, "response", None), "status_code", None) in (404, 410):
+                subscription.delete()
+        except Exception:
+            # Push is best-effort; it must never break the event that created it.
+            continue
