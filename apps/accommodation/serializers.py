@@ -16,6 +16,7 @@ class AccommodationListingSerializer(serializers.ModelSerializer):
     photos = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
     poster_label = serializers.SerializerMethodField()
+    poster_public_id = serializers.SerializerMethodField()
     hostel_agent_badge = serializers.BooleanField(source="owner.is_hostel_agent", read_only=True)
 
     class Meta:
@@ -26,7 +27,7 @@ class AccommodationListingSerializer(serializers.ModelSerializer):
             "service_fee", "other_fees", "other_fees_note", "water_available", "electricity_available",
             "road_access", "security_available", "bathroom_available", "kitchen_available", "furnished",
             "current_occupants", "room_capacity", "roommates_needed", "available_from", "available_until",
-            "status", "reviewer_note", "photos", "images", "is_owner", "poster_label", "created_at", "expires_at",
+            "status", "reviewer_note", "photos", "images", "is_owner", "poster_label", "poster_public_id", "created_at", "expires_at",
             "accuracy_confirmed", "authorization_confirmed", "hostel_agent_badge",
         )
         read_only_fields = ("status", "reviewer_note", "is_owner", "poster_label", "created_at", "expires_at", "photos")
@@ -40,6 +41,11 @@ class AccommodationListingSerializer(serializers.ModelSerializer):
 
     def get_poster_label(self, obj):
         return "Verified KWASU student"
+
+    def get_poster_public_id(self, obj):
+        if obj.owner.is_active and not obj.owner.is_suspended and obj.owner.public_profile_enabled:
+            return str(obj.owner.public_id)
+        return ""
 
     def validate_campus(self, value):
         return validate_campus_choice(value)

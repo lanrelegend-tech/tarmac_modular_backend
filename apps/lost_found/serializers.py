@@ -10,11 +10,17 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
     image_url = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
-    class Meta: model=LostFoundReport; fields=("id","report_type","title","description","category","category_name","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner"); read_only_fields=("status","created_at","is_owner")
+    reporter_public_id = serializers.SerializerMethodField()
+    class Meta: model=LostFoundReport; fields=("id","report_type","title","description","category","category_name","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner","reporter_public_id"); read_only_fields=("status","created_at","is_owner","reporter_public_id")
     def validate_campus(self, value): return validate_campus_choice(value)
     def get_is_owner(self, obj):
         request = self.context.get("request")
         return bool(request and request.user.is_authenticated and obj.reporter_id == request.user.pk)
+    def get_reporter_public_id(self, obj):
+        user = obj.reporter
+        if user.is_active and not user.is_suspended and user.is_student_verified and user.public_profile_enabled:
+            return str(user.public_id)
+        return ""
     def get_image_url(self, obj):
         if not obj.image:
             return None

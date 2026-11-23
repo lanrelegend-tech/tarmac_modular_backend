@@ -299,7 +299,17 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             # development as well as PostgreSQL in production.
             placement_key = self.request.query_params.get("placement")
             if placement_key:
-                active = active.filter(Q(ad_placement__key=placement_key, ad_placement__is_active=True) | Q(ad_placements__key=placement_key, ad_placements__is_active=True)).distinct()
+                # Marketplace now has one visible carousel at the top of its
+                # page. Keep campaigns booked in the former lower card slot
+                # visible in that same carousel so paid ads are not lost.
+                display_keys = [placement_key]
+                if placement_key == "marketplace.banner":
+                    display_keys.append("marketplace.sponsored_card")
+                placement_filter = Q()
+                for key in display_keys:
+                    placement_filter |= Q(ad_placement__key=key, ad_placement__is_active=True)
+                    placement_filter |= Q(ad_placements__key=key, ad_placements__is_active=True)
+                active = active.filter(placement_filter).distinct()
             else:
                 page_text = Cast("pages", output_field=CharField())
                 active = active.filter(Q(IContains(page_text, Value(f'"{page_value}"'))))

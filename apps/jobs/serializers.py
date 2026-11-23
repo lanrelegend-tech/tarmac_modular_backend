@@ -22,6 +22,7 @@ class JobListingSerializer(serializers.ModelSerializer):
     is_owner = serializers.SerializerMethodField()
     is_sponsored = serializers.SerializerMethodField()
     poster_public_id = serializers.SerializerMethodField()
+    poster_profile_visible = serializers.SerializerMethodField()
     identity_type = serializers.ChoiceField(choices=("normal", "anonymous"), required=False)
 
     class Meta:
@@ -30,7 +31,7 @@ class JobListingSerializer(serializers.ModelSerializer):
             "id", "source", "kind", "service_intent", "engagement", "category", "category_name", "title",
             "description", "requirements", "pay_type", "pay_min", "pay_max", "location", "campus",
             "working_hours", "duration", "positions", "deadline", "application_instructions",
-            "application_url", "business_name", "identity_type", "poster_public_id", "poster_name", "poster_status",
+            "application_url", "business_name", "identity_type", "poster_public_id", "poster_profile_visible", "poster_name", "poster_status",
             "is_owner", "is_sponsored", "status", "admin_note", "created_at", "updated_at", "closed_at",
         )
         read_only_fields = ("id", "source", "status", "admin_note", "created_at", "updated_at", "closed_at", "business_name", "poster_public_id", "poster_name", "poster_status", "is_owner", "is_sponsored")
@@ -56,6 +57,13 @@ class JobListingSerializer(serializers.ModelSerializer):
         if obj.identity_type == "anonymous":
             return str(obj.anonymous_identity.public_id) if obj.anonymous_identity_id and obj.anonymous_identity.is_enabled else ""
         return str(obj.owner.public_id) if obj.owner_id else ""
+
+    def get_poster_profile_visible(self, obj):
+        if obj.source != JobListing.Source.STUDENT or not obj.owner_id:
+            return False
+        if obj.identity_type == "anonymous":
+            return bool(obj.anonymous_identity_id and obj.anonymous_identity.is_enabled)
+        return bool(obj.owner.public_profile_enabled)
 
     def get_is_owner(self, obj):
         request = self.context.get("request")

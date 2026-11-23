@@ -109,6 +109,11 @@ class JobListingViewSet(viewsets.ModelViewSet):
         qs = qs.filter(source=JobListing.Source.BUSINESS, business_email_verified_at__isnull=False) | qs.filter(source=JobListing.Source.STUDENT)
         qs = qs.filter(status=JobListing.Status.ACTIVE, deadline__gte=today, category__is_active=True)
         qs = qs.filter(Q(identity_type="normal") | Q(identity_type="anonymous", anonymous_identity__is_enabled=True))
+        shared_listing = self.request.query_params.get("listing")
+        if shared_listing:
+            if not shared_listing.isdigit():
+                return qs.none()
+            qs = qs.filter(pk=int(shared_listing))
         kind = self.request.query_params.get("kind")
         category = self.request.query_params.get("category")
         engagement = self.request.query_params.get("engagement")

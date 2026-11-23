@@ -142,6 +142,18 @@ class ProductViewSet(viewsets.ModelViewSet):
         status_value = Product.Status.PENDING_PAYMENT if serializer.instance.status == Product.Status.PENDING_PAYMENT and platform.listing_fee_enabled and platform.paystack_enabled else Product.Status.PENDING_REVIEW
         serializer.save(status=status_value, expires_at=None)
 
+    @action(detail=True, methods=("patch",), url_path="profile-visibility")
+    def profile_visibility(self, request, pk=None):
+        product = self.get_object()
+        if product.seller_id != request.user.pk:
+            raise PermissionDenied("You can only change profile visibility for your own listing.")
+        value = request.data.get("show_on_profile")
+        if not isinstance(value, bool):
+            raise ValidationError({"show_on_profile": "Choose whether to show this listing on your profile."})
+        product.show_on_profile = value
+        product.save(update_fields=("show_on_profile", "updated_at"))
+        return Response({"id": product.pk, "show_on_profile": product.show_on_profile})
+
     @action(detail=True, methods=["post"], url_path="mark-sold")
     def mark_sold(self, request, pk=None):
         product = self.get_object()

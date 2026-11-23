@@ -22,7 +22,7 @@ class AccommodationListingViewSet(viewsets.ModelViewSet):
     permission_classes = (IsVerifiedStudent, PlatformFeatureEnabled)
     platform_feature = "accommodation_enabled"
     search_fields = ("title", "description", "location_area")
-    filterset_fields = ("post_type", "accommodation_type", "rent_period")
+    filterset_fields = ("id", "post_type", "accommodation_type", "rent_period")
     ordering_fields = ("created_at", "rent_amount", "budget_max")
 
     def get_queryset(self):

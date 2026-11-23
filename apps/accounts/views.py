@@ -223,7 +223,6 @@ class AnonymousIdentityView(generics.RetrieveUpdateAPIView):
 def public_marketplace_identity(request, public_id):
     from apps.products.models import Product
     from apps.jobs.models import JobListing
-    from apps.reviews.models import SellerReview
     identity = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=public_id, user__is_active=True, user__is_suspended=False, user__is_student_verified=True).first()
     is_owner = bool(identity and identity.user_id == request.user.pk)
     if identity and not identity.is_enabled and not is_owner:
@@ -234,11 +233,9 @@ def public_marketplace_identity(request, public_id):
     user = identity.user
     products = Product.objects.filter(seller=user, anonymous_identity=identity, identity_type=Product.IdentityType.ANONYMOUS, show_on_profile=True, visibility=Product.Visibility.PUBLIC, status=Product.Status.ACTIVE).filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())).select_related("category").prefetch_related("images")
     from apps.products.serializers import ProductSerializer
-    reviews = SellerReview.objects.filter(identity_public_id=str(identity.public_id), status=SellerReview.Status.APPROVED).select_related("reviewer")
-    from apps.reviews.serializers import SellerReviewSerializer
     jobs = JobListing.objects.filter(owner=user, anonymous_identity=identity, identity_type="anonymous", source=JobListing.Source.STUDENT, status=JobListing.Status.ACTIVE, deadline__gte=timezone.localdate(), category__is_active=True).select_related("category", "anonymous_identity")
     from apps.jobs.serializers import JobListingSerializer
-    return Response({"public_id": str(identity.public_id), "handle": identity.handle, "campus": user.campus, "area": user.area, "is_enabled": identity.is_enabled, "is_owner": is_owner, "is_student_verified": user.is_student_verified, "student_status": user.student_status, "last_seen_at": user.last_seen_at, "products": ProductSerializer(products, many=True, context={"request": request}).data, "jobs": JobListingSerializer(jobs, many=True, context={"request": request}).data, "reviews": SellerReviewSerializer(reviews, many=True, context={"request": request}).data})
+    return Response({"public_id": str(identity.public_id), "handle": identity.handle, "campus": user.campus, "area": user.area, "is_enabled": identity.is_enabled, "is_owner": is_owner, "is_student_verified": user.is_student_verified, "student_status": user.student_status, "last_seen_at": user.last_seen_at, "products": ProductSerializer(products, many=True, context={"request": request}).data, "jobs": JobListingSerializer(jobs, many=True, context={"request": request}).data})
 
 @api_view(["GET"])
 @permission_classes([IsVerifiedStudent])
@@ -248,9 +245,72 @@ def student_directory(request):
         return Response([])
     from django.db.models import Q
     from .permissions import is_student_feature_eligible
-    candidates = User.objects.filter(is_active=True, is_suspended=False, is_student_verified=True).filter(Q(username__icontains=query) | Q(first_name__icontains=query) | Q(last_name__icontains=query)).exclude(pk=request.user.pk).order_by("username")[:30]
-    results = [{"public_id": str(user.public_id), "username": user.username, "display_name": (user.get_full_name().strip() if user.public_name_enabled else "") or user.username, "student_status": user.student_status} for user in candidates if is_student_feature_eligible(user)]
-    return Response(results)
+    from .models import AnonymousMarketplaceIdentity
+    from apps.administration.models import PlatformSettings
+
+    platform = PlatformSettings.get_solo()
+    words = query.split(maxsplit=1)
+    profile_search = Q(username__istartswith=query) | (Q(public_name_enabled=True) & (Q(first_name__istartswith=query) | Q(last_name__istartswith=query)))
+    if len(words) == 2:
+        profile_search |= Q(public_name_enabled=True, first_name__istartswith=words[0], last_name__istartswith=words[1])
+
+    users = User.objects.filter(
+        profile_search,
+        is_active=True,
+        is_suspended=False,
+        deleted_at__isnull=True,
+        public_profile_enabled=True,
+    )
+    if platform.student_verification_enabled:
+        users = users.filter(is_student_verified=True)
+    if platform.email_verification_required:
+        users = users.filter(email_verified=True)
+    users = list(users.order_by("username")[:30])
+
+    results = []
+    for user in users:
+        if not is_student_feature_eligible(user):
+            continue
+        results.append({
+            "public_id": str(user.public_id),
+            "identity_type": "normal",
+            "username": user.username,
+            "display_name": (user.get_full_name().strip() if user.public_name_enabled else "") or user.username,
+            "student_status": user.student_status,
+            "campus": user.campus,
+            "department": user.department if user.public_department_enabled else "",
+            "level": user.level if user.public_level_enabled else "",
+            "is_hostel_agent": user.is_hostel_agent,
+        })
+
+    identities = AnonymousMarketplaceIdentity.objects.select_related("user").filter(
+        handle__istartswith=query,
+        is_enabled=True,
+        user__is_active=True,
+        user__is_suspended=False,
+        user__deleted_at__isnull=True,
+    )
+    if platform.student_verification_enabled:
+        identities = identities.filter(user__is_student_verified=True)
+    if platform.email_verification_required:
+        identities = identities.filter(user__email_verified=True)
+    for identity in identities.order_by("handle")[:30]:
+        if not is_student_feature_eligible(identity.user):
+            continue
+        results.append({
+            "public_id": str(identity.public_id),
+            "identity_type": "anonymous",
+            "username": identity.handle,
+            "display_name": identity.handle,
+            "student_status": identity.user.student_status,
+            "campus": identity.user.campus,
+            "department": "",
+            "level": "",
+            "is_hostel_agent": identity.user.is_hostel_agent,
+        })
+
+    results.sort(key=lambda profile: (profile["display_name"].casefold(), profile["identity_type"]))
+    return Response(results[:30])
 @api_view(["GET", "PATCH"])
 @permission_classes([permissions.IsAuthenticated])
 def me(request):

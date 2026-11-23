@@ -32,7 +32,7 @@ class ProductOwnerListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ("id", "title", "price", "status", "primary_image")
+        fields = ("id", "title", "price", "status", "primary_image", "show_on_profile", "identity_type")
 
     def get_primary_image(self, obj):
         images = list(obj.images.all())
