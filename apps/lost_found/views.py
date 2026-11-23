@@ -20,7 +20,7 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
     platform_feature = "lost_found_enabled"
     serializer_class=LostFoundReportSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     search_fields = ["title", "description", "location", "colour", "identifying_details"]
-    filterset_fields = ["id", "report_type", "category", "status"]
+    filterset_fields = ["id", "public_id", "report_type", "category", "status"]
     def get_queryset(self):
         queryset = LostFoundReport.objects.select_related("reporter").filter(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
         campus = self.request.query_params.get("campus")

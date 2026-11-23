@@ -5,6 +5,8 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from django.shortcuts import get_object_or_404
+from uuid import UUID
 
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.models import AdminLog, PlatformSettings
@@ -22,8 +24,19 @@ class AccommodationListingViewSet(viewsets.ModelViewSet):
     permission_classes = (IsVerifiedStudent, PlatformFeatureEnabled)
     platform_feature = "accommodation_enabled"
     search_fields = ("title", "description", "location_area")
-    filterset_fields = ("id", "post_type", "accommodation_type", "rent_period")
+    filterset_fields = ("id", "public_id", "post_type", "accommodation_type", "rent_period")
     ordering_fields = ("created_at", "rent_amount", "budget_max")
+
+    def retrieve(self, request, *args, **kwargs):
+        key = kwargs.get(self.lookup_url_kwarg or self.lookup_field)
+        try:
+            public_id = UUID(str(key))
+        except (TypeError, ValueError, AttributeError):
+            return super().retrieve(request, *args, **kwargs)
+        queryset = self.filter_queryset(self.get_queryset())
+        instance = get_object_or_404(queryset, public_id=public_id)
+        self.check_object_permissions(request, instance)
+        return Response(self.get_serializer(instance).data)
 
     def get_queryset(self):
         queryset = AccommodationListing.objects.select_related("owner").prefetch_related("images")

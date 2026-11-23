@@ -72,7 +72,10 @@ class ConversationViewSet(viewsets.ModelViewSet):
             product_id = int(request.data.get("product_id"))
         except (TypeError, ValueError):
             raise ValidationError({"product_id": "Choose a valid listing."})
-        product = Product.objects.select_for_update().select_related("seller", "anonymous_identity").filter(pk=product_id, status=Product.Status.ACTIVE, seller__is_active=True, seller__is_suspended=False).first()
+        # Lock only the product row. Locking the nullable anonymous_identity
+        # outer join raises PostgreSQL's "FOR UPDATE cannot be applied to the
+        # nullable side of an outer join" error for normal student listings.
+        product = Product.objects.select_for_update(of=("self",)).select_related("seller", "anonymous_identity").filter(pk=product_id, status=Product.Status.ACTIVE, seller__is_active=True, seller__is_suspended=False).first()
         if not product or product.seller_id == request.user.pk:
             raise ValidationError({"product_id": "This listing cannot be contacted."})
         if product.identity_type == Product.IdentityType.ANONYMOUS and (not product.anonymous_identity_id or not product.anonymous_identity.is_enabled):

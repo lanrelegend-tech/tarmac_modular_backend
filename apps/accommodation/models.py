@@ -1,9 +1,11 @@
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+from uuid import uuid4
 
 
 class AccommodationListing(models.Model):
+    public_id = models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
     class PostType(models.TextChoices):
         SEEK_ROOMMATE = "roommate", "Looking for a roommate"
         SEEK_ACCOMMODATION = "search", "Looking for accommodation"

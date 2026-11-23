@@ -22,7 +22,7 @@ class AccommodationListingSerializer(serializers.ModelSerializer):
     class Meta:
         model = AccommodationListing
         fields = (
-            "id", "post_type", "accommodation_type", "title", "description", "location_area", "campus",
+            "id", "public_id", "post_type", "accommodation_type", "title", "description", "location_area", "campus",
             "rent_amount", "budget_min", "budget_max", "rent_period", "agency_fee", "caution_fee",
             "service_fee", "other_fees", "other_fees_note", "water_available", "electricity_available",
             "road_access", "security_available", "bathroom_available", "kitchen_available", "furnished",

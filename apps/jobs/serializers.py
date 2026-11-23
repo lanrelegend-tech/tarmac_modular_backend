@@ -28,13 +28,13 @@ class JobListingSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobListing
         fields = (
-            "id", "source", "kind", "service_intent", "engagement", "category", "category_name", "title",
+            "id", "public_id", "source", "kind", "service_intent", "engagement", "category", "category_name", "title",
             "description", "requirements", "pay_type", "pay_min", "pay_max", "location", "campus",
             "working_hours", "duration", "positions", "deadline", "application_instructions",
             "application_url", "business_name", "identity_type", "poster_public_id", "poster_profile_visible", "poster_name", "poster_status",
             "is_owner", "is_sponsored", "status", "admin_note", "created_at", "updated_at", "closed_at",
         )
-        read_only_fields = ("id", "source", "status", "admin_note", "created_at", "updated_at", "closed_at", "business_name", "poster_public_id", "poster_name", "poster_status", "is_owner", "is_sponsored")
+        read_only_fields = ("id", "public_id", "source", "status", "admin_note", "created_at", "updated_at", "closed_at", "business_name", "poster_public_id", "poster_name", "poster_status", "is_owner", "is_sponsored")
 
     def get_poster_name(self, obj):
         if obj.source == JobListing.Source.BUSINESS:

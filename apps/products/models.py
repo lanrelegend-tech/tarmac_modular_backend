@@ -9,6 +9,7 @@ class Category(models.Model):
 class Product(models.Model):
     class Condition(models.TextChoices): LIKE_NEW="like_new","Like new"; VERY_GOOD="very_good","Very good"; GOOD="good","Good"; FAIR="fair","Fair"
     class Status(models.TextChoices): PENDING_PAYMENT="pending_payment","Pending payment"; PENDING_REVIEW="pending_review","Pending school review"; ACTIVE="active","Active"; RESERVED="reserved","Reserved"; SOLD="sold","Sold"; EXPIRED="expired","Expired"; REMOVED="removed","Removed"
+    public_id=models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
     seller=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="products"); category=models.ForeignKey(Category,on_delete=models.PROTECT,related_name="products")
     class Visibility(models.TextChoices): PUBLIC="public","Public"; INVITE_ONLY="invite_only","Selected students"; DRAFT="draft","Only me"
     class IdentityType(models.TextChoices): NORMAL="normal","Normal profile"; ANONYMOUS="anonymous","Anonymous marketplace identity"

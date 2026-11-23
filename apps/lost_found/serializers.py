@@ -11,7 +11,7 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
     reporter_public_id = serializers.SerializerMethodField()
-    class Meta: model=LostFoundReport; fields=("id","report_type","title","description","category","category_name","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner","reporter_public_id"); read_only_fields=("status","created_at","is_owner","reporter_public_id")
+    class Meta: model=LostFoundReport; fields=("id","public_id","report_type","title","description","category","category_name","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner","reporter_public_id"); read_only_fields=("public_id","status","created_at","is_owner","reporter_public_id")
     def validate_campus(self, value): return validate_campus_choice(value)
     def get_is_owner(self, obj):
         request = self.context.get("request")

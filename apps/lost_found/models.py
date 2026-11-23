@@ -12,6 +12,7 @@ def claim_evidence_upload_to(instance, filename):
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
     return f"item_claims/{uuid4().hex}.{extension}"
 class LostFoundReport(models.Model):
+    public_id=models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
     class Type(models.TextChoices): LOST="lost","Lost"; FOUND="found","Found"
     class Status(models.TextChoices): OPEN="open","Open"; MATCHED="matched","Potential match"; RETURNED="returned","Returned"; CLOSED="closed","Closed"
     reporter=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="lost_found_reports"); report_type=models.CharField(max_length=10,choices=Type.choices)

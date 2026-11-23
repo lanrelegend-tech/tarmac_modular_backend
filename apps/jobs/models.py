@@ -2,6 +2,7 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+from uuid import uuid4
 
 
 class JobCategory(models.Model):
@@ -18,6 +19,7 @@ class JobCategory(models.Model):
 
 
 class JobListing(models.Model):
+    public_id = models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
     class Source(models.TextChoices):
         STUDENT = "student", "Student"
         BUSINESS = "business", "External business"

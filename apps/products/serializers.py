@@ -32,7 +32,7 @@ class ProductOwnerListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ("id", "title", "price", "status", "primary_image", "show_on_profile", "identity_type")
+        fields = ("id", "public_id", "title", "price", "status", "primary_image", "show_on_profile", "identity_type")
 
     def get_primary_image(self, obj):
         images = list(obj.images.all())
@@ -90,7 +90,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ("id", "seller_public_id", "seller_identity_type", "seller_profile_visible", "is_owner", "seller_verified", "seller_name", "seller_campus", "campus", "area", "seller_department", "seller_level", "seller_course", "seller_status", "category", "category_name", "title", "description", "condition", "price", "negotiable", "location", "visibility", "identity_type", "show_on_profile", "audience_public_ids", "status", "expires_at", "is_featured", "featured_until", "sponsor_listing", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "images", "created_at", "updated_at")
+        fields = ("id", "public_id", "seller_public_id", "seller_identity_type", "seller_profile_visible", "is_owner", "seller_verified", "seller_name", "seller_campus", "campus", "area", "seller_department", "seller_level", "seller_course", "seller_status", "category", "category_name", "title", "description", "condition", "price", "negotiable", "location", "visibility", "identity_type", "show_on_profile", "audience_public_ids", "status", "expires_at", "is_featured", "featured_until", "sponsor_listing", "sponsor_requested", "sponsorship_fee_kobo", "sponsorship_duration_days", "featured_position", "images", "created_at", "updated_at")
         read_only_fields = ("status", "expires_at", "is_featured", "featured_until", "created_at", "updated_at")
 
     def get_seller_name(self, obj):
@@ -205,6 +205,12 @@ class ProductSerializer(serializers.ModelSerializer):
         return product
 class FavouriteSerializer(serializers.ModelSerializer):
     class Meta: model=Favourite; fields=("id","product","created_at"); read_only_fields=("created_at",)
+
+    def create(self, validated_data):
+        # Retries and quick duplicate taps should return the saved row instead
+        # of violating the unique (user, product) constraint.
+        favourite, _ = Favourite.objects.get_or_create(**validated_data)
+        return favourite
 
     def validate_product(self, product):
         request = self.context.get("request")
