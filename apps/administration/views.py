@@ -35,8 +35,7 @@ from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,
 from .permissions import IsAdminOrAbove, IsModeratorOrAbove
 from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminAdministratorSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer,EmergencyContactSerializer
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
-from apps.notifications.services import notify_user, dispatch_notification
-from apps.notifications.models import Notification
+from apps.notifications.services import notify_user
 from config.storage import optimized_image_response
 import logging
 
@@ -224,10 +223,15 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
             reason = verification.reviewer_note or "The submitted details need correction. Contact Tarmac Support if you need help."
             body = f"Your verification was not approved. Administrator's reason: {reason}\n\nPlease correct the issue and submit a new verification request. Your student ID image has been deleted. If the note concerns account details you cannot edit, contact Tarmac Support before resubmitting."
         event_key = f"verification-reviewed:{verification.pk}:{status_value}"
-        notify_user(user, subject, body, {"kind": "verification_review", "status": status_value, "reviewer_note": verification.reviewer_note, "verification_id": verification.pk}, event_key)
-        email_notification_id = Notification.objects.filter(dedupe_key=f"{event_key}:email").values_list("pk", flat=True).first()
-        if email_notification_id:
-            transaction.on_commit(lambda notification_id=email_notification_id: dispatch_notification(notification_id))
+        notify_user(
+            user,
+            subject,
+            body,
+            {"kind": "verification_review", "status": status_value, "reviewer_note": verification.reviewer_note, "verification_id": verification.pk},
+            event_key,
+            dispatch_email=True,
+            force_email=True,
+        )
 
     @action(detail=True, methods=["get"], url_path="student-id")
     def student_id(self, request, pk=None):

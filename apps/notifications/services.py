@@ -101,8 +101,9 @@ def notify_user(user, subject, body, data, event_key, *, dispatch_email=False, f
     category = (data or {}).get("notification_category") or notification_category(kind)
     category_settings = (platform.notification_channels or {}).get(category, {})
     email_notification = None
-    if platform.email_notifications_enabled and category_settings.get("email", True) and (force_email or user.notification_email_enabled) and user.email:
-        email_notification = queue_notification(user, Notification.Channel.EMAIL, subject, body, data, f"{event_key}:email")
+    if user.email and (force_email or (platform.email_notifications_enabled and category_settings.get("email", True) and user.notification_email_enabled)):
+        email_data = {**(data or {}), "_force_email_delivery": True} if force_email else data
+        email_notification = queue_notification(user, Notification.Channel.EMAIL, subject, body, email_data, f"{event_key}:email")
     if dispatch_email and email_notification:
         transaction.on_commit(lambda notification_id=email_notification.pk: dispatch_notification(notification_id))
     if category_settings.get("whatsapp", False) and user.notification_whatsapp_enabled and user.whatsapp_consent_at and user.whatsapp_number:
@@ -262,7 +263,8 @@ def dispatch_notification(notification_id):
             data = notification.data or {}
             category = data.get("notification_category") or notification_category(data.get("kind", ""))
             category_channels = (platform.notification_channels or {}).get(category, {})
-            if notification.channel == Notification.Channel.EMAIL and not (
+            forced_email = data.get("_force_email_delivery") is True
+            if notification.channel == Notification.Channel.EMAIL and not forced_email and not (
                 platform.email_notifications_enabled and category_channels.get("email", True) and notification.user.notification_email_enabled
             ):
                 notification.is_sent = True
