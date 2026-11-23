@@ -150,15 +150,15 @@ class ConversationViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="start-profile")
     @transaction.atomic
     def start_profile(self, request):
+        raise PermissionDenied("Start a conversation from the marketplace listing, job, gig, accommodation post, or Lost & Found match you are contacting about.")
+
+    @action(detail=False, methods=["get"], url_path="profile-conversation")
+    def profile_conversation(self, request):
         from apps.accounts.models import AnonymousMarketplaceIdentity, User
-        from .serializers import create_participant_snapshot
-        public_id = request.data.get("identity_public_id")
-        identity_type = request.data.get("identity_type", "normal")
-        my_identity_type = request.data.get("my_identity_type", "normal")
+        public_id = request.query_params.get("identity_public_id")
+        identity_type = request.query_params.get("identity_type", "normal")
         if identity_type not in ("normal", "anonymous") or not public_id:
             raise ValidationError({"identity_public_id": "Choose a valid public marketplace profile."})
-        if my_identity_type not in ("normal", "anonymous"):
-            raise ValidationError({"my_identity_type": "Choose normal or anonymous identity."})
         alias = None
         if identity_type == "anonymous":
             alias = AnonymousMarketplaceIdentity.objects.select_related("user").filter(public_id=public_id, is_enabled=True).first()
@@ -170,18 +170,15 @@ class ConversationViewSet(viewsets.ModelViewSet):
         if BlockedUser.objects.filter(blocked_by__in=(request.user, target), blocked_user__in=(request.user, target)).exists():
             raise PermissionDenied("Messaging is unavailable because one account has blocked the other.")
         expected_public_id = str(alias.public_id) if alias else str(target.public_id)
-        my_alias = getattr(request.user, "anonymous_marketplace_identity", None) if my_identity_type == "anonymous" else None
-        if my_identity_type == "anonymous" and (not my_alias or not my_alias.is_enabled):
-            raise ValidationError({"my_identity_type": "Create and enable an anonymous marketplace identity first."})
-        candidates = Conversation.objects.filter(context_type=Conversation.ContextType.GENERAL, participants=request.user).filter(participants=target).prefetch_related("participant_snapshots")
-        expected_my_public_id = str(my_alias.public_id) if my_alias else str(request.user.public_id)
-        conversation = next((row for row in candidates if (snapshot := next((item for item in row.participant_snapshots.all() if item.user_id == target.pk), None)) and snapshot.identity_type == identity_type and snapshot.public_identity_id == expected_public_id and (my_snapshot := next((item for item in row.participant_snapshots.all() if item.user_id == request.user.pk), None)) and my_snapshot.identity_type == my_identity_type and my_snapshot.public_identity_id == expected_my_public_id), None)
+        candidates = Conversation.objects.filter(
+            participants=request.user,
+            status=Conversation.Status.OPEN,
+            is_official=False,
+        ).filter(participants=target).prefetch_related("participant_snapshots").order_by("-updated_at", "-pk")
+        conversation = next((row for row in candidates if (snapshot := next((item for item in row.participant_snapshots.all() if item.user_id == target.pk), None)) and snapshot.identity_type == identity_type and snapshot.public_identity_id == expected_public_id), None)
         if not conversation:
-            conversation = Conversation.objects.create(context_type=Conversation.ContextType.GENERAL, context_title="Marketplace profile")
-            conversation.participants.add(request.user, target)
-            create_participant_snapshot(conversation, request.user, identity_type=my_identity_type)
-            create_participant_snapshot(conversation, target, identity_type=identity_type)
-        return Response(self.get_serializer(conversation).data, status=201)
+            return Response({"id": None})
+        return Response(self.get_serializer(conversation).data)
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):
         conversation = self.get_object()
@@ -221,8 +218,8 @@ class ConversationViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def complete(self, request, pk=None):
         conversation = Conversation.objects.select_for_update().get(pk=self.get_object().pk)
-        if conversation.context_type not in (Conversation.ContextType.GENERAL, Conversation.ContextType.MARKETPLACE, Conversation.ContextType.LOST_FOUND, Conversation.ContextType.JOBS, Conversation.ContextType.ACCOMMODATION):
-            raise ValidationError({"detail": "Only student conversations can be completed here."})
+        if conversation.context_type not in (Conversation.ContextType.MARKETPLACE, Conversation.ContextType.LOST_FOUND, Conversation.ContextType.ACCOMMODATION):
+            raise ValidationError({"detail": "Only conversations linked to a marketplace item, Lost & Found match, or accommodation post can be marked complete."})
         participants = list(conversation.participants.filter(is_staff=False))
         if request.user not in participants or len(participants) != 2:
             raise PermissionDenied("Only the two students in this conversation can confirm completion.")
