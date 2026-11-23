@@ -145,8 +145,12 @@ class AdWaitlistEntry(models.Model):
 
 class AdImpression(models.Model):
     campaign = models.ForeignKey(AdCampaign, on_delete=models.CASCADE, related_name="impressions")
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ad_impressions")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ad_impressions", null=True, blank=True)
+    visitor_hash = models.CharField(max_length=64, blank=True, db_index=True)
     day = models.DateField()
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta:
-        constraints = [models.UniqueConstraint(fields=("campaign", "user", "day"), name="unique_daily_user_ad_impression")]
+        constraints = [
+            models.UniqueConstraint(fields=("campaign", "user", "day"), condition=models.Q(user__isnull=False), name="unique_daily_user_ad_impression"),
+            models.UniqueConstraint(fields=("campaign", "visitor_hash", "day"), condition=~models.Q(visitor_hash=""), name="unique_daily_visitor_ad_impression"),
+        ]

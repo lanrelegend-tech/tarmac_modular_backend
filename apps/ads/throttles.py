@@ -11,3 +11,7 @@ class PublicAdPaymentThrottle(AnonRateThrottle):
 
 class PublicAdManageThrottle(AnonRateThrottle):
     scope = "external_ad_manage"
+
+
+class PublicAdImpressionThrottle(AnonRateThrottle):
+    scope = "external_ad_impression"

@@ -157,7 +157,10 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
     search_fields = ["user__email", "user__username", "user__first_name", "user__last_name", "user__matric_number", "user__anonymous_marketplace_identity__handle"]
 
     def get_queryset(self):
-        queryset = StudentVerification.objects.select_related("user", "user__course", "user__anonymous_marketplace_identity", "reviewed_by").order_by("status", "created_at")
+        # Keep the newest submissions visible on the first admin page. Ordering
+        # by status first could bury a newly approved student's record behind
+        # older records and pagination.
+        queryset = StudentVerification.objects.select_related("user", "user__course", "user__anonymous_marketplace_identity", "reviewed_by").order_by("-created_at", "-pk")
         status_filter = self.request.query_params.get("status")
         return queryset.filter(status=status_filter) if status_filter else queryset
 

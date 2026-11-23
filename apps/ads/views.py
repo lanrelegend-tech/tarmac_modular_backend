@@ -1,8 +1,11 @@
 import hashlib
+import hmac
 import secrets
 import os
+import uuid
 from datetime import datetime, timedelta
 
+from django.conf import settings
 from django.db.models import F, Q, CharField, Value
 from django.db import transaction
 from django.db.models.functions import Cast
@@ -15,6 +18,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from config.storage import optimized_image_response
@@ -23,7 +27,7 @@ from apps.administration.permissions import IsAdminOrAbove, PlatformFeatureEnabl
 from .models import AdAdvertiser, AdCampaign, AdImpression, AdPlacement, AdSlotHold, AdWaitlistEntry
 from .serializers import AdCampaignSerializer, AdPlacementSerializer, AdWaitlistEntrySerializer
 from .services import get_slot_availability, local_date_window
-from .throttles import PublicAdManageThrottle, PublicAdSubmissionThrottle
+from .throttles import PublicAdImpressionThrottle, PublicAdManageThrottle, PublicAdSubmissionThrottle
 
 
 def _token_hash(token):
@@ -232,10 +236,14 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             return [PublicAdSubmissionThrottle()]
         if getattr(self, "action", None) in ("public_manage", "public_cancel"):
             return [PublicAdManageThrottle()]
+        if getattr(self, "action", None) == "impression":
+            return [PublicAdImpressionThrottle(), UserRateThrottle()]
         return super().get_throttles()
 
     def get_permissions(self):
         if getattr(self, "action", None) in ("list", "retrieve", "image_file", "click"):
+            return [permissions.AllowAny(), PlatformFeatureEnabled()]
+        if getattr(self, "action", None) == "impression" and not self.request.user.is_authenticated:
             return [permissions.AllowAny(), PlatformFeatureEnabled()]
         if getattr(self, "action", None) in ("public_submit", "public_manage", "public_cancel"):
             return [permissions.AllowAny(), PlatformFeatureEnabled()]
@@ -699,7 +707,23 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         campaign = self.get_object()
         if campaign.status != AdCampaign.Status.ACTIVE:
             raise PermissionDenied("This ad is not active.")
-        impression, created = AdImpression.objects.get_or_create(campaign=campaign, user=request.user, day=timezone.localdate())
+        if request.user.is_authenticated:
+            impression, created = AdImpression.objects.get_or_create(campaign=campaign, user=request.user, day=timezone.localdate())
+        else:
+            homepage_campaign = (
+                "homepage" in (campaign.pages or [])
+                or campaign.placement == AdCampaign.Placement.HOMEPAGE
+                or (campaign.ad_placement_id and campaign.ad_placement.page == "homepage")
+                or campaign.ad_placements.filter(page="homepage").exists()
+            )
+            if not homepage_campaign:
+                raise PermissionDenied("Guest impressions are only counted for homepage advertisements.")
+            try:
+                visitor_id = str(uuid.UUID(str(request.data.get("visitor_id", ""))))
+            except (TypeError, ValueError, AttributeError):
+                raise ValidationError({"visitor_id": "A valid anonymous visitor ID is required."})
+            visitor_hash = hmac.new(settings.SECRET_KEY.encode("utf-8"), visitor_id.encode("ascii"), hashlib.sha256).hexdigest()
+            impression, created = AdImpression.objects.get_or_create(campaign=campaign, user=None, visitor_hash=visitor_hash, day=timezone.localdate())
         if created:
             AdCampaign.objects.filter(pk=campaign.pk, status=AdCampaign.Status.ACTIVE).update(impression_count=F("impression_count") + 1)
         return Response({"tracked": created})
