@@ -238,7 +238,7 @@ def public_marketplace_identity(request, public_id):
     from apps.reviews.serializers import SellerReviewSerializer
     jobs = JobListing.objects.filter(owner=user, anonymous_identity=identity, identity_type="anonymous", source=JobListing.Source.STUDENT, status=JobListing.Status.ACTIVE, deadline__gte=timezone.localdate(), category__is_active=True).select_related("category", "anonymous_identity")
     from apps.jobs.serializers import JobListingSerializer
-    return Response({"public_id": str(identity.public_id), "handle": identity.handle, "campus": user.campus, "is_enabled": identity.is_enabled, "is_owner": is_owner, "is_student_verified": user.is_student_verified, "student_status": user.student_status, "last_seen_at": user.last_seen_at, "products": ProductSerializer(products, many=True, context={"request": request}).data, "jobs": JobListingSerializer(jobs, many=True, context={"request": request}).data, "reviews": SellerReviewSerializer(reviews, many=True, context={"request": request}).data})
+    return Response({"public_id": str(identity.public_id), "handle": identity.handle, "campus": user.campus, "area": user.area, "is_enabled": identity.is_enabled, "is_owner": is_owner, "is_student_verified": user.is_student_verified, "student_status": user.student_status, "last_seen_at": user.last_seen_at, "products": ProductSerializer(products, many=True, context={"request": request}).data, "jobs": JobListingSerializer(jobs, many=True, context={"request": request}).data, "reviews": SellerReviewSerializer(reviews, many=True, context={"request": request}).data})
 
 @api_view(["GET"])
 @permission_classes([IsVerifiedStudent])

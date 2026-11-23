@@ -53,7 +53,7 @@ class ProductPagination(PageNumberPagination):
 class ProductViewSet(viewsets.ModelViewSet):
     platform_feature = "marketplace_enabled"
     pagination_class = ProductPagination
-    serializer_class=ProductSerializer; permission_classes=[VerifiedStudentOrReadOnly, PlatformFeatureEnabled]; filterset_fields=["category","condition","status"]; search_fields=["title","description","location"]; ordering_fields=["price","created_at"]
+    serializer_class=ProductSerializer; permission_classes=[VerifiedStudentOrReadOnly, PlatformFeatureEnabled]; filterset_fields=["category","condition","status"]; search_fields=["title","description","location","area"]; ordering_fields=["price","created_at"]
     def get_serializer_class(self):
         if self.action == "list" and self.request.query_params.get("mine") == "true":
             return ProductOwnerListSerializer
@@ -83,6 +83,9 @@ class ProductViewSet(viewsets.ModelViewSet):
             campus = self.request.query_params.get("campus")
             if campus:
                 available = available.filter(campus__iexact=campus.strip()[:120])
+            area = self.request.query_params.get("area")
+            if area:
+                available = available.filter(area__iexact=area.strip()[:120])
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
         if self.action == "list" and self.request.query_params.get("featured") == "true":
             if not platform.featured_products_enabled or not platform.sponsored_products_enabled:
@@ -91,6 +94,9 @@ class ProductViewSet(viewsets.ModelViewSet):
             campus = self.request.query_params.get("campus")
             if campus:
                 available = available.filter(campus__iexact=campus.strip()[:120])
+            area = self.request.query_params.get("area")
+            if area:
+                available = available.filter(area__iexact=area.strip()[:120])
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
         if self.action in ("list","retrieve"):
             own_products = qs.filter(seller=self.request.user) if self.request.user.is_authenticated else qs.none()
@@ -104,6 +110,9 @@ class ProductViewSet(viewsets.ModelViewSet):
             campus = self.request.query_params.get("campus")
             if campus:
                 queryset = queryset.filter(campus__iexact=campus.strip()[:120])
+            area = self.request.query_params.get("area")
+            if area:
+                queryset = queryset.filter(area__iexact=area.strip()[:120])
             return queryset
         if not self.request.user.is_authenticated:
             return qs.none()

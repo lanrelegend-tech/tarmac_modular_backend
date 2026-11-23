@@ -666,6 +666,7 @@ def system_status(request):
             "contact_email": config.contact_email,
         },
         "campuses": config.campuses or [],
+        "campus_areas": config.campus_areas or {},
         "maintenance_mode": config.maintenance_mode,
         "maintenance_message": config.maintenance_message if config.maintenance_mode else "",
         "features": {

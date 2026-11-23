@@ -28,6 +28,10 @@ def default_campuses():
     return []
 
 
+def default_campus_areas():
+    return {}
+
+
 def report_evidence_upload_to(instance, filename):
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else "jpg"
     return f"report_evidence/{uuid4().hex}.{extension}"
@@ -74,6 +78,7 @@ class PlatformSettings(models.Model):
     support_email = models.EmailField(blank=True)
     contact_email = models.EmailField(blank=True)
     campuses = models.JSONField(default=default_campuses, blank=True)
+    campus_areas = models.JSONField(default=default_campus_areas, blank=True)
     registration_enabled = models.BooleanField(default=True)
     listing_approval_required = models.BooleanField(default=True)
     max_product_images = models.PositiveSmallIntegerField(default=5)

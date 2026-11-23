@@ -34,7 +34,7 @@ class User(AbstractUser):
     whatsapp_number = models.CharField(max_length=25, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True, db_index=True)
     deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    campus = models.CharField(max_length=120, blank=True); bio = models.CharField(max_length=200, blank=True)
+    campus = models.CharField(max_length=120, blank=True); area = models.CharField(max_length=120, blank=True); bio = models.CharField(max_length=200, blank=True)
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT)
     is_student_verified = models.BooleanField(default=False); is_suspended = models.BooleanField(default=False)
