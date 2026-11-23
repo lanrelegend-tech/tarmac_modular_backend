@@ -1,6 +1,5 @@
 import os
 import hashlib
-import secrets
 import requests
 from urllib.parse import urlencode
 from datetime import timedelta
@@ -22,16 +21,31 @@ from .models import Payment
 from .serializers import PaymentSerializer
 from .throttles import PaymentInitializationThrottle
 from apps.ads.throttles import PublicAdPaymentThrottle
+from .provider import PaystackVerificationError, verify_paystack_transaction
+from .settlement import confirm_successful_payment
+
+
+def _payment_callback_url():
+    configured = os.getenv("PAYSTACK_CALLBACK_URL", "").strip()
+    if configured:
+        return configured
+    origin = os.getenv("FRONTEND_ORIGIN", "").split(",")[0].rstrip("/")
+    return f"{origin}/payment-return" if origin else ""
+
+
 class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class=PaymentSerializer; permission_classes=[IsVerifiedStudent]
-    def get_queryset(self): return Payment.objects.filter(user=self.request.user)
+    def get_queryset(self):
+        queryset = Payment.objects.filter(user=self.request.user)
+        reference = self.request.query_params.get("reference", "").strip()
+        return queryset.filter(reference=reference) if reference else queryset
     def get_permissions(self):
-        if getattr(self, "action", None) == "initialize_external_ad":
+        if getattr(self, "action", None) in ("initialize_external_ad", "verify_external_ad"):
             return [permissions.AllowAny()]
         return [IsVerifiedStudent()]
     def get_throttles(self):
-        if getattr(self, "action", None) in ("initialize_listing_fee", "initialize_external_ad"):
-            if getattr(self, "action", None) == "initialize_external_ad":
+        if getattr(self, "action", None) in ("initialize_listing_fee", "initialize_external_ad", "verify_external_ad", "verify"):
+            if getattr(self, "action", None) in ("initialize_external_ad", "verify_external_ad"):
                 return [PublicAdPaymentThrottle()]
             return [PaymentInitializationThrottle()]
         return super().get_throttles()
@@ -68,7 +82,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         if existing and existing.provider_response.get("data", {}).get("authorization_url"):
             return Response({"reference": existing.reference, "authorization_url": existing.provider_response["data"]["authorization_url"]})
         payment = Payment.objects.create(user=request.user, product=product, amount_kobo=amount_kobo)
-        callback_url = os.getenv("PAYSTACK_CALLBACK_URL", "")
+        callback_url = _payment_callback_url()
         payload = {
             "email": request.user.email,
             "amount": payment.amount_kobo,
@@ -164,6 +178,63 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         payment.save(update_fields=("provider_response",))
         return Response({"reference": payment.reference, "authorization_url": provider_response["data"]["authorization_url"]}, status=status.HTTP_201_CREATED)
 
+    @action(detail=False, methods=["post"], url_path="verify-external-ad")
+    def verify_external_ad(self, request):
+        token = str(request.data.get("token", "")).strip()
+        reference = str(request.data.get("reference", "")).strip()
+        try:
+            campaign_id = int(request.data.get("campaign"))
+        except (TypeError, ValueError):
+            raise ValidationError({"campaign": "Provide a valid campaign ID."})
+        token_hash = hashlib.sha256(token.encode()).hexdigest() if token else ""
+        campaign = AdCampaign.objects.filter(
+            pk=campaign_id,
+            business_advertiser__isnull=False,
+            management_token_hash=token_hash,
+        ).first() if token_hash else None
+        if campaign is None and token_hash:
+            advertiser = AdAdvertiser.objects.filter(management_token_hash=token_hash).first()
+            campaign = AdCampaign.objects.filter(pk=campaign_id, business_advertiser=advertiser).first() if advertiser else None
+        if not campaign:
+            raise PermissionDenied("This private campaign link is invalid or expired.")
+        payment = Payment.objects.filter(advertisement=campaign, reference=reference).first()
+        if not payment:
+            raise ValidationError({"reference": "No payment matches this campaign."})
+        try:
+            provider_data = verify_paystack_transaction(reference)
+        except PaystackVerificationError as exc:
+            raise exc
+        if provider_data.get("status") == "success":
+            _, result = confirm_successful_payment(reference, provider_data)
+            if result == "mismatch":
+                raise ValidationError({"payment": "Paystack returned payment details that do not match the campaign charge."})
+        payment.refresh_from_db()
+        campaign.refresh_from_db()
+        return Response({"payment_status": payment.status, "campaign_status": campaign.status, "provider_status": provider_data.get("status")})
+
+    @action(detail=False, methods=["post"], url_path="verify")
+    def verify(self, request):
+        reference = str(request.data.get("reference", "")).strip()
+        if not reference:
+            raise ValidationError({"reference": "Provide the payment reference."})
+        payment = Payment.objects.filter(user=request.user, reference=reference).first()
+        if not payment:
+            raise PermissionDenied("This payment does not belong to your account.")
+        try:
+            provider_data = verify_paystack_transaction(reference)
+        except PaystackVerificationError as exc:
+            raise exc
+        if provider_data.get("status") == "success":
+            _, result = confirm_successful_payment(reference, provider_data)
+            if result == "mismatch":
+                raise ValidationError({"payment": "Paystack returned payment details that do not match this charge."})
+        elif provider_data.get("status") == "failed" and payment.status != Payment.Status.SUCCESS:
+            payment.status = Payment.Status.FAILED
+            payment.provider_response = {"status": provider_data.get("status"), "gateway_response": provider_data.get("gateway_response")}
+            payment.save(update_fields=("status", "provider_response"))
+        payment.refresh_from_db()
+        return Response({"reference": reference, "status": payment.status, "provider_status": provider_data.get("status")})
+
     @action(detail=False, methods=["post"], url_path="initialize-ad-fee")
     @transaction.atomic
     def initialize_ad_fee(self, request):
@@ -209,7 +280,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         payment = Payment.objects.create(user=request.user, advertisement=ad, amount_kobo=amount_kobo)
         payload = {"email": request.user.email, "amount": payment.amount_kobo, "currency": payment.currency, "reference": payment.reference,
                    "metadata": {"advertisement_id": ad.pk, "user_id": request.user.pk}}
-        callback_url = os.getenv("PAYSTACK_CALLBACK_URL", "")
+        callback_url = _payment_callback_url()
         if callback_url:
             payload["callback_url"] = callback_url
         try:
@@ -256,7 +327,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"reference": existing.reference, "authorization_url": existing.provider_response["data"]["authorization_url"]})
         payment = Payment.objects.create(user=request.user, subscription_plan=plan, amount_kobo=plan.price_kobo)
         payload = {"email": request.user.email, "amount": payment.amount_kobo, "currency": payment.currency, "reference": payment.reference, "metadata": {"subscription_plan_id": plan.pk, "user_id": request.user.pk}}
-        callback_url = os.getenv("PAYSTACK_CALLBACK_URL", "")
+        callback_url = _payment_callback_url()
         if callback_url: payload["callback_url"] = callback_url
         try:
             response = requests.post("https://api.paystack.co/transaction/initialize", json=payload, headers={"Authorization": f"Bearer {secret}"}, timeout=15)

@@ -59,7 +59,10 @@ class AdPlacementViewSet(viewsets.ModelViewSet):
     platform_feature = "ads_enabled"
     serializer_class = AdPlacementSerializer
     queryset = AdPlacement.objects.all()
-    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+    # Placement setup is managed by the dedicated admin-tools endpoint. Keep
+    # this endpoint read-only for placement records; public waitlist signup is
+    # the only POST action it needs to accept.
+    http_method_names = ["get", "post", "head", "options"]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -137,10 +140,25 @@ class AdminAdWaitlistViewSet(viewsets.ReadOnlyModelViewSet):
         _send_waitlist_offer(entry, request.user)
         return Response({"status": entry.status, "offer_expires_at": entry.offer_expires_at})
 
+    @action(detail=True, methods=["post"], url_path="cancel")
+    @transaction.atomic
+    def cancel(self, request, pk=None):
+        entry = get_object_or_404(AdWaitlistEntry.objects.select_for_update().select_related("placement"), pk=pk)
+        if entry.status not in (AdWaitlistEntry.Status.WAITING, AdWaitlistEntry.Status.OFFERED):
+            raise ValidationError({"status": "Only waiting or offered entries can be cancelled."})
+        entry.status = AdWaitlistEntry.Status.CANCELLED
+        entry.offer_token_hash = ""
+        entry.offer_expires_at = None
+        entry.save(update_fields=("status", "offer_token_hash", "offer_expires_at", "updated_at"))
+        from apps.administration.models import AdminLog
+        AdminLog.objects.create(actor=request.user, action="ad_waitlist_entry_cancelled", target_type="AdWaitlistEntry", target_id=str(entry.pk), metadata={"placement": entry.placement.key})
+        transaction.on_commit(lambda: _offer_next_waitlisted(entry.placement, entry.starts_at, entry.ends_at))
+        return Response({"status": entry.status})
+
 
 class AdminAdPlacementViewSet(viewsets.ModelViewSet):
     serializer_class = AdPlacementSerializer
-    queryset = AdPlacement.objects.all()
+    queryset = AdPlacement.objects.exclude(key__endswith=".featured_brand")
     permission_classes = [IsAdminOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
 

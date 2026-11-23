@@ -10,7 +10,7 @@ from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import viewsets,permissions, status, generics
 from rest_framework.decorators import action, api_view, permission_classes as drf_permission_classes
-from rest_framework.exceptions import MethodNotAllowed, ValidationError
+from rest_framework.exceptions import APIException, MethodNotAllowed, ValidationError
 from rest_framework.response import Response
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from django.db import models
@@ -184,8 +184,13 @@ class AdminVerificationViewSet(viewsets.ModelViewSet):
         status_value = serializer.validated_data["status"]
         user = User.objects.select_for_update().get(pk=verification.user_id)
         if status_value == StudentVerification.Status.APPROVED:
-            if PlatformSettings.get_solo().email_verification_required and not user.email_verified:
+            platform = PlatformSettings.get_solo()
+            if platform.email_verification_required and not user.email_verified:
                 raise ValidationError({"status": "The student must verify their email before approval."})
+            if platform.require_student_id and not verification.student_id_image:
+                raise ValidationError({"status": "The student has not submitted an ID image. Ask them to submit it before approval."})
+            if not user.profile_picture:
+                raise ValidationError({"status": "The student has not submitted a profile photo for account security."})
             duplicate = User.objects.filter(matric_number=verification.submitted_matric_number).exclude(pk=user.pk).exists()
             if duplicate:
                 raise ValidationError({"status": "This matric number is already assigned to another account."})
@@ -999,20 +1004,58 @@ class AdminPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         return Payment.objects.select_related("user", "product", "advertisement", "subscription_plan").order_by("-created_at")
 
+    @action(detail=True, methods=("post",), url_path="refund")
+    @transaction.atomic
+    def refund(self, request, pk=None):
+        payment = Payment.objects.select_for_update().get(pk=pk)
+        if payment.status != Payment.Status.SUCCESS:
+            raise ValidationError({"payment": "Only a successful payment can be refunded."})
+        if payment.refund_status:
+            raise ValidationError({"refund_status": "A refund already exists for this payment. Use Retry refund only if Paystack marked it failed."})
+        reason = str(request.data.get("reason", "")).strip()
+        if len(reason) < 5:
+            raise ValidationError({"reason": "Enter a clear reason of at least 5 characters."})
+        from apps.payments.refunds import request_paystack_refund
+        result = request_paystack_refund(payment, reason=reason, actor=request.user)
+        AdminLog.objects.create(actor=request.user, action="payment_refund_requested", target_type="Payment", target_id=str(payment.pk), metadata={"refund_status": result["status"], "reason": reason[:200], "detail": result["detail"]})
+        payment.refresh_from_db()
+        return Response({"refund_status": payment.refund_status, "refund_reference": payment.refund_reference, "detail": result["detail"]})
+
     @action(detail=True, methods=("post",), url_path="retry-refund")
     @transaction.atomic
     def retry_refund(self, request, pk=None):
-        payment = Payment.objects.select_for_update().select_related("advertisement").get(pk=pk)
-        if not payment.advertisement_id or payment.status != Payment.Status.SUCCESS:
-            raise ValidationError({"payment": "Only successful advertisement payments can be refunded here."})
+        payment = Payment.objects.select_for_update().get(pk=pk)
+        if payment.status != Payment.Status.SUCCESS:
+            raise ValidationError({"payment": "Only a successful payment can be refunded."})
         if payment.refund_status != Payment.RefundStatus.FAILED:
             raise ValidationError({"refund_status": "Only a failed refund can be retried."})
-        reason = payment.advertisement.reviewer_note or "Tarmac advertisement campaign rejection."
+        reason = str(request.data.get("reason", "")).strip() or "Administrator retry of a failed Paystack refund."
         from apps.payments.refunds import request_paystack_refund
         result = request_paystack_refund(payment, reason=reason, actor=request.user)
-        AdminLog.objects.create(actor=request.user, action="ad_refund_retried", target_type="Payment", target_id=str(payment.pk), metadata={"refund_status": result["status"], "detail": result["detail"]})
+        AdminLog.objects.create(actor=request.user, action="payment_refund_retried", target_type="Payment", target_id=str(payment.pk), metadata={"refund_status": result["status"], "detail": result["detail"]})
         payment.refresh_from_db()
         return Response({"refund_status": payment.refund_status, "refund_reference": payment.refund_reference, "detail": result["detail"]})
+
+    @action(detail=True, methods=("post",), url_path="verify-paystack")
+    def verify_paystack(self, request, pk=None):
+        payment = self.get_object()
+        if payment.status == Payment.Status.SUCCESS:
+            return Response({"status": payment.status, "detail": "Payment was already confirmed."})
+        from apps.payments.provider import PaystackVerificationError, verify_paystack_transaction
+        from apps.payments.settlement import confirm_successful_payment
+        try:
+            provider_data = verify_paystack_transaction(payment.reference)
+        except PaystackVerificationError as exc:
+            raise exc
+        if provider_data.get("status") == "success":
+            _, result = confirm_successful_payment(payment.reference, provider_data)
+            if result == "mismatch":
+                raise ValidationError({"payment": "Paystack returned payment details that do not match this charge."})
+        elif provider_data.get("status") == "failed":
+            Payment.objects.filter(pk=payment.pk, status=Payment.Status.INITIALIZED).update(status=Payment.Status.FAILED, provider_response={"status": provider_data.get("status"), "gateway_response": provider_data.get("gateway_response")})
+        payment.refresh_from_db()
+        AdminLog.objects.create(actor=request.user, action="payment_reconciled_with_paystack", target_type="Payment", target_id=str(payment.pk), metadata={"provider_status": provider_data.get("status"), "payment_status": payment.status})
+        return Response({"status": payment.status, "provider_status": provider_data.get("status")})
 
 class AdminLostFoundViewSet(viewsets.ModelViewSet):
     serializer_class = AdminLostFoundSerializer

@@ -26,7 +26,8 @@ def request_paystack_refund(payment, *, reason, actor=None):
         payment.save(update_fields=("refund_status", "refund_response", "refund_requested_at"))
         return {"status": payment.refund_status, "detail": "Refund could not be submitted because Paystack is not configured."}
 
-    reference = f"TARAD-{payment.pk}-{uuid.uuid4().hex[:16]}"
+    payment_kind = "advertisement" if payment.advertisement_id else "marketplace listing" if payment.product_id else "subscription" if payment.subscription_plan_id else "Tarmac payment"
+    reference = f"TAR-{payment.pk}-{uuid.uuid4().hex[:16]}"
     payment.refund_status = Payment.RefundStatus.PENDING
     payment.refund_reference = reference
     payment.refund_requested_at = timezone.now()
@@ -39,8 +40,8 @@ def request_paystack_refund(payment, *, reason, actor=None):
                 "transaction": payment.reference,
                 "amount": payment.amount_kobo,
                 "currency": payment.currency,
-                "customer_note": "Your Tarmac advertising campaign was not approved.",
-                "merchant_note": f"Campaign rejection: {reason[:200]}",
+                "customer_note": "Your Tarmac payment refund is being processed.",
+                "merchant_note": f"Tarmac {payment_kind} refund: {reason[:175]}",
                 "reference": reference,
             },
             headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/json"},
@@ -60,7 +61,7 @@ def request_paystack_refund(payment, *, reason, actor=None):
         payment.save(update_fields=("refund_status", "refund_response"))
         return {"status": payment.refund_status, "detail": "Paystack accepted the refund request. The bank may take several business days to return the funds."}
     except (requests.RequestException, ValueError) as exc:
-        logger.exception("Paystack ad refund request failed for payment %s", payment.pk)
+        logger.exception("Paystack refund request failed for payment %s", payment.pk)
         # The request may have reached Paystack before the connection failed.
         # Keep it pending so staff reconcile it by reference instead of risking a duplicate refund.
         payment.refund_status = Payment.RefundStatus.PENDING

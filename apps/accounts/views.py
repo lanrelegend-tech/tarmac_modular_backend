@@ -411,7 +411,12 @@ class VerificationViewSet(viewsets.ModelViewSet):
         if serializer.validated_data.get("student_id_image") and serializer.instance.student_id_image:
             from .services import delete_verification_id_image
             delete_verification_id_image(serializer.instance)
+        profile_photo = serializer.validated_data.pop("profile_picture", None)
+        serializer.validated_data.pop("profile_photo_consent", None)
         serializer.save()
+        if profile_photo:
+            from .services import save_account_profile_photo
+            save_account_profile_photo(self.request.user, profile_photo)
     def perform_create(self, serializer):
         from apps.administration.models import PlatformSettings
         from django.utils import timezone

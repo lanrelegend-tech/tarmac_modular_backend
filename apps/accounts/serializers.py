@@ -157,7 +157,16 @@ class RegisterSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = User.objects.create_user(**validated_data)
         from apps.administration.models import PlatformSettings
-        if PlatformSettings.get_solo().email_verification_required:
+        platform = PlatformSettings.get_solo()
+        # Put manually reviewed registrations in the admin queue as soon as
+        # the account is created. The ID upload is added after email sign-in.
+        if platform.student_verification_enabled and not platform.auto_approve_students:
+            StudentVerification.objects.create(
+                user=user,
+                submitted_matric_number=user.matric_number,
+                requested_affiliation="student",
+            )
+        if platform.email_verification_required:
             from .services import issue_account_action_token
             issue_account_action_token(user, AccountActionToken.Purpose.EMAIL_VERIFY)
         else:
@@ -221,23 +230,35 @@ class StudentVerificationSerializer(serializers.ModelSerializer):
     student_id_image = serializers.ImageField(write_only=True, required=False, allow_null=True)
     profile_picture = serializers.ImageField(write_only=True, required=False, allow_null=True)
     profile_photo_consent = serializers.BooleanField(write_only=True, required=False)
-    class Meta: model=StudentVerification; fields=("id","student_id_image","profile_picture","profile_photo_consent","submitted_matric_number","requested_affiliation","status","reviewer_note","created_at"); read_only_fields=("status","reviewer_note","created_at")
+    has_student_id_image = serializers.SerializerMethodField()
+    has_profile_photo = serializers.SerializerMethodField()
+    class Meta: model=StudentVerification; fields=("id","student_id_image","has_student_id_image","has_profile_photo","profile_picture","profile_photo_consent","submitted_matric_number","requested_affiliation","status","reviewer_note","created_at"); read_only_fields=("status","reviewer_note","created_at","has_student_id_image","has_profile_photo")
+
+    def get_has_student_id_image(self, obj):
+        return bool(obj.student_id_image)
+
+    def get_has_profile_photo(self, obj):
+        return bool(obj.user.profile_picture)
 
     def validate(self, attrs):
         user = self.context["request"].user
         from apps.administration.models import PlatformSettings
         platform = PlatformSettings.get_solo()
         if not platform.student_verification_enabled: raise serializers.ValidationError("Student verification is currently disabled by the school.")
-        if platform.require_student_id and not attrs.get("student_id_image") and self.instance is None: raise serializers.ValidationError({"student_id_image": "Upload your student ID card or alumni proof to continue."})
+        if platform.require_student_id and not attrs.get("student_id_image") and not (self.instance and self.instance.student_id_image): raise serializers.ValidationError({"student_id_image": "Upload your student ID card or alumni proof to continue."})
         if self.instance is None and not attrs.get("profile_picture") and not user.profile_picture:
             raise serializers.ValidationError({"profile_picture": "Upload a clear photo of yourself for account security."})
         if self.instance is None and not attrs.get("profile_photo_consent"):
+            raise serializers.ValidationError({"profile_photo_consent": "Confirm that you agree to Tarmac storing your profile photo for account security."})
+        if self.instance and not user.profile_picture and not attrs.get("profile_picture"):
+            raise serializers.ValidationError({"profile_picture": "Upload a clear photo of yourself for account security."})
+        if self.instance and not user.profile_picture and not attrs.get("profile_photo_consent"):
             raise serializers.ValidationError({"profile_photo_consent": "Confirm that you agree to Tarmac storing your profile photo for account security."})
         if self.instance is None and user.is_student_verified:
             raise serializers.ValidationError("Your student account is already verified.")
         if self.instance and self.instance.status != StudentVerification.Status.PENDING:
             raise serializers.ValidationError("A reviewed verification submission cannot be changed.")
-        if self.instance and "profile_picture" in attrs:
+        if self.instance and user.profile_picture and "profile_picture" in attrs:
             raise serializers.ValidationError({"profile_picture": "Use the profile change request to update your saved profile photo."})
         if self.instance is None and StudentVerification.objects.filter(user=user, status=StudentVerification.Status.PENDING).exists():
             raise serializers.ValidationError("You already have a pending verification submission.")
