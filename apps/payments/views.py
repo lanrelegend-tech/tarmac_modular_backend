@@ -11,7 +11,6 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 from rest_framework.response import Response
 from apps.accounts.permissions import IsVerifiedStudent
 from apps.administration.models import PlatformSettings
-from apps.administration.models import SubscriptionPlan
 from apps.administration.platform import FeatureUnavailable
 from apps.products.models import Product
 from apps.ads.models import AdCampaign
@@ -36,7 +35,7 @@ def _payment_callback_url():
 class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class=PaymentSerializer; permission_classes=[IsVerifiedStudent]
     def get_queryset(self):
-        queryset = Payment.objects.filter(user=self.request.user)
+        queryset = Payment.objects.filter(user=self.request.user).select_related("product", "advertisement", "subscription_plan").order_by("-created_at", "-pk")
         reference = self.request.query_params.get("reference", "").strip()
         return queryset.filter(reference=reference) if reference else queryset
     def get_permissions(self):
@@ -107,7 +106,6 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         payment.provider_response = provider_response
         payment.save(update_fields=("provider_response",))
         return Response({"reference": payment.reference, "authorization_url": provider_response["data"]["authorization_url"]}, status=status.HTTP_201_CREATED)
-
     @action(detail=False, methods=["post"], url_path="initialize-external-ad")
     @transaction.atomic
     def initialize_external_ad(self, request):
@@ -130,10 +128,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         platform = PlatformSettings.get_solo()
         if not platform.ads_enabled:
             raise FeatureUnavailable("Advertising is currently disabled.")
-        if not platform.ad_fee_enabled or not platform.paystack_enabled:
-            campaign.price_kobo = 0
+        if not campaign.payment_required_snapshot:
             campaign.status = AdCampaign.Status.PENDING_REVIEW
-            campaign.save(update_fields=("price_kobo", "status", "updated_at"))
+            campaign.save(update_fields=("status", "updated_at"))
             placements = list(campaign.ad_placements.order_by("pk")) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
             for slot in placements:
                 AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": campaign.starts_at, "ends_at": campaign.ends_at, "expires_at": campaign.ends_at, "is_confirmed": True})
@@ -248,10 +245,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         platform = PlatformSettings.get_solo()
         if not platform.ads_enabled:
             raise FeatureUnavailable("Advertising is currently disabled.")
-        if not platform.ad_fee_enabled or not platform.paystack_enabled:
-            ad.price_kobo = 0
+        if not ad.payment_required_snapshot:
             ad.status = AdCampaign.Status.PENDING_REVIEW
-            ad.save(update_fields=("price_kobo", "status", "updated_at"))
+            ad.save(update_fields=("status", "updated_at"))
             placements = list(ad.ad_placements.order_by("pk")) or list(AdPlacement.objects.filter(pk=ad.ad_placement_id))
             for slot in placements:
                 AdSlotHold.objects.update_or_create(campaign=ad, placement=slot, defaults={"starts_at": ad.starts_at, "ends_at": ad.ends_at, "expires_at": ad.ends_at, "is_confirmed": True})
@@ -262,8 +258,8 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         existing = Payment.objects.filter(advertisement=ad, status=Payment.Status.INITIALIZED).order_by("-created_at").first()
         if existing and existing.provider_response.get("data", {}).get("authorization_url"):
             return Response({"reference": existing.reference, "authorization_url": existing.provider_response["data"]["authorization_url"]})
-        amount_kobo = ad.price_kobo or (ad.package.price_kobo if ad.package_id else platform.ad_fee_kobo)
-        if not platform.ad_fee_enabled or amount_kobo == 0:
+        amount_kobo = ad.price_kobo
+        if amount_kobo == 0:
             raise ValidationError({"advertisement": "This campaign does not require a payment."})
         placements = list(ad.ad_placements.order_by("pk")) or list(AdPlacement.objects.select_for_update().filter(pk=ad.ad_placement_id))
         if not placements:
@@ -297,44 +293,4 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "Could not initialize payment. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
         payment.provider_response = provider_response
         payment.save(update_fields=("provider_response",))
-        return Response({"reference": payment.reference, "authorization_url": provider_response["data"]["authorization_url"]}, status=status.HTTP_201_CREATED)
-
-    @action(detail=False, methods=["post"], url_path="initialize-subscription")
-    @transaction.atomic
-    def initialize_subscription(self, request):
-        try: plan = SubscriptionPlan.objects.select_for_update().get(pk=int(request.data.get("plan")), is_active=True)
-        except (TypeError, ValueError, SubscriptionPlan.DoesNotExist): raise ValidationError({"plan": "Choose an active subscription plan."})
-        from apps.accounts.models import User
-        User.objects.select_for_update().get(pk=request.user.pk)
-        from apps.administration.models import StudentSubscription
-        active_subscription = StudentSubscription.objects.filter(user=request.user, plan=plan, status=StudentSubscription.Status.ACTIVE, ends_at__gt=timezone.now()).first()
-        if active_subscription: return Response({"free": True, "subscription_id": active_subscription.pk, "already_active": True})
-        platform = PlatformSettings.get_solo()
-        if not platform.subscription_fee_enabled and plan.price_kobo > 0:
-            # The administrator disabled fees; grant this plan without charging.
-            from django.utils import timezone
-            subscription = StudentSubscription.objects.create(user=request.user, plan=plan, ends_at=timezone.now() + timedelta(days=plan.duration_days))
-            return Response({"free": True, "subscription_id": subscription.pk}, status=status.HTTP_201_CREATED)
-        if plan.price_kobo == 0:
-            from django.utils import timezone
-            subscription = StudentSubscription.objects.create(user=request.user, plan=plan, ends_at=timezone.now() + timedelta(days=plan.duration_days))
-            return Response({"free": True, "subscription_id": subscription.pk}, status=status.HTTP_201_CREATED)
-        if not platform.paystack_enabled: raise FeatureUnavailable("Paystack payments are currently disabled.")
-        secret = os.getenv("PAYSTACK_SECRET_KEY")
-        if not secret: raise APIException("Subscription payments are not configured. Contact the site administrator.")
-        existing = Payment.objects.filter(user=request.user, subscription_plan=plan, status=Payment.Status.INITIALIZED).order_by("-created_at").first()
-        if existing and existing.provider_response.get("data", {}).get("authorization_url"):
-            return Response({"reference": existing.reference, "authorization_url": existing.provider_response["data"]["authorization_url"]})
-        payment = Payment.objects.create(user=request.user, subscription_plan=plan, amount_kobo=plan.price_kobo)
-        payload = {"email": request.user.email, "amount": payment.amount_kobo, "currency": payment.currency, "reference": payment.reference, "metadata": {"subscription_plan_id": plan.pk, "user_id": request.user.pk}}
-        callback_url = _payment_callback_url()
-        if callback_url: payload["callback_url"] = callback_url
-        try:
-            response = requests.post("https://api.paystack.co/transaction/initialize", json=payload, headers={"Authorization": f"Bearer {secret}"}, timeout=15)
-            response.raise_for_status(); provider_response = response.json()
-            if not provider_response.get("status") or not provider_response.get("data", {}).get("authorization_url"): raise RuntimeError(provider_response.get("message", "Paystack did not return a checkout URL."))
-        except (requests.RequestException, ValueError, RuntimeError) as exc:
-            payment.status = Payment.Status.FAILED; payment.provider_response = {"error": str(exc)[:1000]}; payment.save(update_fields=("status", "provider_response"))
-            return Response({"detail": "Could not initialize payment. Please try again."}, status=status.HTTP_502_BAD_GATEWAY)
-        payment.provider_response = provider_response; payment.save(update_fields=("provider_response",))
         return Response({"reference": payment.reference, "authorization_url": provider_response["data"]["authorization_url"]}, status=status.HTTP_201_CREATED)

@@ -38,6 +38,11 @@ class BlockedUser(models.Model):
 class Message(models.Model):
     conversation=models.ForeignKey(Conversation,on_delete=models.CASCADE,related_name="messages"); sender=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE)
     body=models.TextField(); created_at=models.DateTimeField(auto_now_add=True); read_at=models.DateTimeField(null=True,blank=True)
+    class Meta:
+        indexes = [
+            models.Index(fields=("conversation", "-created_at", "-id"), name="message_convo_recent_idx"),
+            models.Index(fields=("conversation", "read_at", "sender"), name="message_unread_lookup_idx"),
+        ]
 
 class MessageAttachment(models.Model):
     message = models.ForeignKey(Message, on_delete=models.CASCADE, related_name="attachments")

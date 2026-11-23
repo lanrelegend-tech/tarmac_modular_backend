@@ -67,7 +67,24 @@ class ReportEvidence(models.Model):
 
 class Announcement(models.Model):
     class Audience(models.TextChoices): ALL_VERIFIED="all_verified", "All verified students"; DEPARTMENT="department", "Department"
-    title=models.CharField(max_length=160); body=models.TextField(); created_by=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT); is_published=models.BooleanField(default=False); pinned=models.BooleanField(default=False); audience=models.CharField(max_length=20,choices=Audience.choices,default=Audience.ALL_VERIFIED); department=models.CharField(max_length=120,blank=True); published_at=models.DateTimeField(null=True,blank=True); delivery_cursor=models.PositiveBigIntegerField(default=0); delivery_completed=models.BooleanField(default=False); recipient_count=models.PositiveBigIntegerField(default=0); created_at=models.DateTimeField(auto_now_add=True)
+    title=models.CharField(max_length=160); body=models.TextField(); image=models.ImageField(upload_to="announcements/", blank=True, null=True); created_by=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT); is_published=models.BooleanField(default=False); is_archived=models.BooleanField(default=False, db_index=True); archived_at=models.DateTimeField(null=True,blank=True); expires_at=models.DateTimeField(null=True,blank=True,db_index=True); pinned=models.BooleanField(default=False); audience=models.CharField(max_length=20,choices=Audience.choices,default=Audience.ALL_VERIFIED); department=models.CharField(max_length=120,blank=True); published_at=models.DateTimeField(null=True,blank=True); delivery_cursor=models.PositiveBigIntegerField(default=0); delivery_completed=models.BooleanField(default=False); recipient_count=models.PositiveBigIntegerField(default=0); created_at=models.DateTimeField(auto_now_add=True)
+
+
+class AnnouncementPublisher(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="announcement_publisher_access")
+    granted_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="granted_announcement_publisher_access")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-is_active", "user__email")
+
+    def __str__(self):
+        return f"Announcement publisher: {self.user.email}"
+
+
 class AdminLog(models.Model):
     actor=models.ForeignKey(settings.AUTH_USER_MODEL,null=True,on_delete=models.SET_NULL); action=models.CharField(max_length=120); target_type=models.CharField(max_length=80,blank=True); target_id=models.CharField(max_length=80,blank=True); metadata=models.JSONField(default=dict,blank=True); created_at=models.DateTimeField(auto_now_add=True)
 

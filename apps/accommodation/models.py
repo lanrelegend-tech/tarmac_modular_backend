@@ -32,6 +32,7 @@ class AccommodationListing(models.Model):
         REJECTED = "rejected", "Rejected"
         REMOVED = "removed", "Removed"
         FILLED = "filled", "No longer available"
+        EXPIRED = "expired", "Expired"
 
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="accommodation_listings")
     campus = models.CharField(max_length=120, db_index=True, blank=True)
@@ -82,7 +83,7 @@ class AccommodationListing(models.Model):
 
     def expire_if_due(self):
         if self.status == self.Status.ACTIVE and self.expires_at and self.expires_at <= timezone.now():
-            self.status = self.Status.FILLED
+            self.status = self.Status.EXPIRED
             self.save(update_fields=("status", "updated_at"))
             return True
         return False

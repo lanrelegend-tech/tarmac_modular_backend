@@ -16,6 +16,7 @@ class JobCategorySerializer(serializers.ModelSerializer):
 
 class JobListingSerializer(serializers.ModelSerializer):
     campus = serializers.CharField(required=True, max_length=120)
+    application_url = serializers.CharField(required=False, allow_blank=True, max_length=500)
     category_name = serializers.CharField(source="category.name", read_only=True)
     poster_name = serializers.SerializerMethodField()
     poster_status = serializers.SerializerMethodField()
@@ -78,9 +79,13 @@ class JobListingSerializer(serializers.ModelSerializer):
         return value
 
     def validate_application_url(self, value):
-        if value and not value.lower().startswith("https://"):
-            raise serializers.ValidationError("Application links must use HTTPS.")
-        return value
+        if value:
+            from config.url_validation import normalize_public_contact_url
+            try:
+                return normalize_public_contact_url(value)
+            except ValueError as exc:
+                raise serializers.ValidationError(str(exc)) from exc
+        return ""
 
     def validate_campus(self, value):
         return validate_campus_choice(value)
@@ -157,6 +162,7 @@ class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
     business_contact_name = serializers.CharField(max_length=120)
     business_email = serializers.EmailField()
     business_phone = serializers.CharField(max_length=30)
+    application_url = serializers.CharField(required=False, allow_blank=True, max_length=500)
     business_website = serializers.URLField(required=False, allow_blank=True)
     business_description = serializers.CharField(required=False, allow_blank=True, max_length=1500)
 
@@ -177,10 +183,21 @@ class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
     def validate_campus(self, value):
         return validate_campus_choice(value)
 
-    def validate_application_url(self, value):
-        if value and not value.lower().startswith("https://"):
-            raise serializers.ValidationError("Application links must use HTTPS.")
+    def validate_business_website(self, value):
+        if value:
+            from config.url_validation import is_safe_external_url
+            if not is_safe_external_url(value):
+                raise serializers.ValidationError("Enter a public HTTPS business website without embedded login details.")
         return value
+
+    def validate_application_url(self, value):
+        if value:
+            from config.url_validation import normalize_public_contact_url
+            try:
+                return normalize_public_contact_url(value)
+            except ValueError as exc:
+                raise serializers.ValidationError(str(exc)) from exc
+        return ""
 
     def validate_deadline(self, value):
         today = timezone.localdate()

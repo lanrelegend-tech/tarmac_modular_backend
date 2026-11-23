@@ -41,7 +41,12 @@ class AccommodationListingViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = AccommodationListing.objects.select_related("owner").prefetch_related("images")
         if self.request.query_params.get("mine") == "true":
-            return queryset.filter(owner=self.request.user).exclude(status=AccommodationListing.Status.REMOVED)
+            AccommodationListing.objects.filter(
+                owner=self.request.user,
+                status=AccommodationListing.Status.ACTIVE,
+                expires_at__lte=timezone.now(),
+            ).update(status=AccommodationListing.Status.EXPIRED)
+            return queryset.filter(owner=self.request.user)
         campus = self.request.query_params.get("campus")
         if campus:
             queryset = queryset.filter(campus__iexact=campus.strip()[:120])
@@ -54,7 +59,8 @@ class AccommodationListingViewSet(viewsets.ModelViewSet):
         if self.action in ("retrieve", "update", "partial_update", "destroy"):
             visible = Q(status=AccommodationListing.Status.ACTIVE, expires_at__isnull=True) | Q(status=AccommodationListing.Status.ACTIVE, expires_at__gt=timezone.now())
             agent_policy = ~Q(post_type=AccommodationListing.PostType.OFFER_ACCOMMODATION) | Q(owner__is_hostel_agent=True)
-            return queryset.filter(eligible_owner & visible & agent_policy | Q(owner=self.request.user, status__in=(AccommodationListing.Status.PENDING_REVIEW, AccommodationListing.Status.REJECTED, AccommodationListing.Status.ACTIVE)))
+            own_visible = Q(owner=self.request.user, status__in=(AccommodationListing.Status.PENDING_REVIEW, AccommodationListing.Status.REJECTED)) | Q(owner=self.request.user, status=AccommodationListing.Status.ACTIVE, expires_at__isnull=True) | Q(owner=self.request.user, status=AccommodationListing.Status.ACTIVE, expires_at__gt=timezone.now())
+            return queryset.filter(eligible_owner & visible & agent_policy | own_visible)
         public_listings = ~Q(post_type=AccommodationListing.PostType.OFFER_ACCOMMODATION) | Q(owner__is_hostel_agent=True)
         return queryset.filter(eligible_owner, status=AccommodationListing.Status.ACTIVE).filter(public_listings).filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
 
@@ -82,6 +88,17 @@ class AccommodationListingViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You can only remove your own accommodation post.")
         instance.status = AccommodationListing.Status.REMOVED
         instance.save(update_fields=("status", "updated_at"))
+
+    @action(detail=True, methods=("post",))
+    def filled(self, request, pk=None):
+        listing = self.get_object()
+        if listing.owner_id != request.user.pk:
+            raise PermissionDenied("You can only close your own accommodation post.")
+        if listing.status != AccommodationListing.Status.ACTIVE:
+            raise ValidationError({"detail": "Only a published post can be marked as no longer available."})
+        listing.status = AccommodationListing.Status.FILLED
+        listing.save(update_fields=("status", "updated_at"))
+        return Response({"status": listing.status})
 
     @action(detail=True, methods=("post",))
     @transaction.atomic
@@ -123,6 +140,10 @@ class AdminAccommodationListingViewSet(viewsets.ModelViewSet):
     filterset_fields = ("status", "post_type", "accommodation_type")
 
     def get_queryset(self):
+        AccommodationListing.objects.filter(
+            status=AccommodationListing.Status.ACTIVE,
+            expires_at__lte=timezone.now(),
+        ).update(status=AccommodationListing.Status.EXPIRED)
         return AccommodationListing.objects.select_related("owner", "reviewed_by").prefetch_related("images")
 
     @transaction.atomic

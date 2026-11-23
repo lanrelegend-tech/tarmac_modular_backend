@@ -56,6 +56,12 @@ class ItemClaimSerializer(serializers.ModelSerializer):
     def validate_evidence(self, value):
         if value and value.size > 5 * 1024 * 1024: raise serializers.ValidationError("Evidence must be 5 MB or smaller.")
         if value and value.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"): raise serializers.ValidationError("Use JPG, PNG, WEBP or PDF evidence.")
+        if value and value.content_type == "application/pdf":
+            from config.upload_validation import validate_pdf_upload
+            try:
+                validate_pdf_upload(value)
+            except ValueError as error:
+                raise serializers.ValidationError(str(error)) from error
         return value
     def validate_report(self, report):
         if report.report_type != LostFoundReport.Type.FOUND or not report.is_active:

@@ -88,6 +88,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         if self.action == "list" and self.request.query_params.get("mine") == "true":
             if not self.request.user.is_authenticated:
                 return qs.none()
+            qs.filter(seller=self.request.user, status=Product.Status.ACTIVE, expires_at__lte=timezone.now()).update(status=Product.Status.EXPIRED)
             return qs.filter(seller=self.request.user).distinct()
         if self.action == "list" and self.request.query_params.get("sponsored") == "true":
             if not platform.sponsored_products_enabled or not platform.featured_products_enabled:
@@ -151,9 +152,28 @@ class ProductViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         if serializer.instance.seller_id != self.request.user.id:
             raise PermissionDenied("You can only edit your own listing.")
+        if serializer.instance.status in (Product.Status.SOLD, Product.Status.EXPIRED, Product.Status.REMOVED):
+            raise ValidationError({"status": "Sold, expired, or removed listings cannot be edited or republished."})
         platform = PlatformSettings.get_solo()
         status_value = Product.Status.PENDING_PAYMENT if serializer.instance.status == Product.Status.PENDING_PAYMENT and platform.listing_fee_enabled and platform.paystack_enabled else Product.Status.PENDING_REVIEW
         serializer.save(status=status_value, expires_at=None)
+
+    def perform_destroy(self, instance):
+        if instance.seller_id != self.request.user.pk:
+            raise PermissionDenied("You can only remove your own listing.")
+        if instance.status == Product.Status.REMOVED:
+            return
+        instance.status = Product.Status.REMOVED
+        instance.is_featured = False
+        instance.featured_until = None
+        instance.save(update_fields=("status", "is_featured", "featured_until", "updated_at"))
+        AdminLog.objects.create(
+            actor=self.request.user,
+            action="marketplace_listing_owner_removed",
+            target_type="Product",
+            target_id=str(instance.pk),
+            metadata={"title": instance.title},
+        )
 
     @action(detail=True, methods=("patch",), url_path="profile-visibility")
     def profile_visibility(self, request, pk=None):
@@ -174,6 +194,9 @@ class ProductViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only the listing owner can mark it as sold.")
         if product.status not in (Product.Status.ACTIVE, Product.Status.RESERVED):
             raise ValidationError({"status": "Only an active listing can be marked as sold."})
+        if product.expires_at and product.expires_at <= timezone.now():
+            Product.objects.filter(pk=product.pk, status=Product.Status.ACTIVE).update(status=Product.Status.EXPIRED)
+            raise ValidationError({"status": "This listing has expired and is no longer available to mark as sold."})
         product.status = Product.Status.SOLD
         product.save(update_fields=("status", "updated_at"))
         return Response(self.get_serializer(product).data)

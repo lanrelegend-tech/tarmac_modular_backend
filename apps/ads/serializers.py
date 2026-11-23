@@ -1,6 +1,4 @@
 from django.conf import settings
-from ipaddress import ip_address
-from urllib.parse import urlsplit
 from rest_framework import serializers
 
 from .models import AdCampaign, AdAdvertiser, AdPlacement, AdWaitlistEntry
@@ -10,23 +8,24 @@ from apps.accounts.models import User
 class AdCampaignSerializer(serializers.ModelSerializer):
     PAGE_CHOICES = {"homepage", "marketplace", "lost_found", "announcements", "jobs"}
     image = serializers.ImageField(write_only=True, required=False, allow_null=True)
+    target_url = serializers.CharField(max_length=500)
     image_url = serializers.SerializerMethodField()
     advertiser_email = serializers.EmailField(write_only=True, required=False)
     owner_email = serializers.SerializerMethodField()
     advertiser_name = serializers.SerializerMethodField()
-    package_name = serializers.CharField(source="package.name", read_only=True, allow_null=True)
+    package_name = serializers.SerializerMethodField()
     placement_key = serializers.CharField(source="ad_placement.key", read_only=True, allow_null=True)
     ad_placements = serializers.PrimaryKeyRelatedField(many=True, queryset=AdPlacement.objects.filter(is_active=True), required=False)
     placement_keys = serializers.SerializerMethodField()
-    admin_amount_kobo = serializers.IntegerField(write_only=True, required=False, min_value=0)
     has_successful_payment = serializers.SerializerMethodField()
     payment_status = serializers.SerializerMethodField()
     refund_status = serializers.SerializerMethodField()
+    paid_amount_kobo = serializers.SerializerMethodField()
 
     class Meta:
         model = AdCampaign
-        fields = ("id", "package", "package_name", "business_name", "advertiser_email", "owner_email", "advertiser_name", "pages", "ad_placement", "ad_placements", "placement_key", "placement_keys", "business_advertiser", "display_image", "admin_amount_kobo", "price_kobo", "duration_days", "title", "description", "image", "image_url", "target_url", "placement", "status", "click_count", "impression_count", "starts_at", "ends_at", "approved_at", "created_at", "reviewer_note", "advertising_policy_accepted", "advertising_policy_accepted_at", "has_successful_payment", "payment_status", "refund_status")
-        read_only_fields = ("id", "status", "price_kobo", "duration_days", "click_count", "impression_count", "approved_at", "business_advertiser", "created_at", "reviewer_note", "advertising_policy_accepted", "advertising_policy_accepted_at", "has_successful_payment", "payment_status", "refund_status")
+        fields = ("id", "package", "package_name", "plan_price_kobo", "payment_required_snapshot", "business_name", "advertiser_email", "owner_email", "advertiser_name", "pages", "ad_placement", "ad_placements", "placement_key", "placement_keys", "business_advertiser", "display_image", "price_kobo", "duration_days", "title", "description", "image", "image_url", "target_url", "placement", "status", "click_count", "impression_count", "starts_at", "ends_at", "approved_at", "created_at", "reviewer_note", "advertising_policy_accepted", "advertising_policy_accepted_at", "has_successful_payment", "paid_amount_kobo", "payment_status", "refund_status")
+        read_only_fields = ("id", "status", "plan_price_kobo", "payment_required_snapshot", "price_kobo", "duration_days", "click_count", "impression_count", "approved_at", "business_advertiser", "created_at", "reviewer_note", "advertising_policy_accepted", "advertising_policy_accepted_at", "has_successful_payment", "paid_amount_kobo", "payment_status", "refund_status")
 
     def get_fields(self):
         fields = super().get_fields()
@@ -34,8 +33,10 @@ class AdCampaignSerializer(serializers.ModelSerializer):
         if not (request and request.user.is_staff):
             fields.pop("owner_email", None)
             fields["advertiser_email"].read_only = True
-            fields["admin_amount_kobo"].read_only = True
         return fields
+
+    def get_package_name(self, obj):
+        return obj.plan_name_snapshot or (obj.package.name if obj.package_id else "")
 
     def _payments(self, obj):
         return sorted(obj.payments.all(), key=lambda payment: (payment.created_at, payment.pk), reverse=True)
@@ -46,6 +47,9 @@ class AdCampaignSerializer(serializers.ModelSerializer):
 
     def get_has_successful_payment(self, obj):
         return any(payment.status == "success" for payment in self._payments(obj)) if self._can_view_payment(obj) else False
+
+    def get_paid_amount_kobo(self, obj):
+        return sum(payment.amount_kobo for payment in self._payments(obj) if payment.status == "success") if self._can_view_payment(obj) else 0
 
     def get_payment_status(self, obj):
         if not self._can_view_payment(obj):
@@ -68,6 +72,10 @@ class AdCampaignSerializer(serializers.ModelSerializer):
     def get_image_url(self, obj):
         if not obj.image:
             return None
+        # Approved campaign artwork is public content. Let Cloudinary's CDN
+        # serve the transformed image instead of using a Django worker.
+        if obj.status == AdCampaign.Status.ACTIVE and getattr(obj.image.storage, "cloudinary_enabled", False):
+            return obj.image.url
         request = self.context.get("request")
         path = f"/api/ads/{obj.pk}/image/"
         return request.build_absolute_uri(path) if request else path
@@ -95,22 +103,18 @@ class AdCampaignSerializer(serializers.ModelSerializer):
 
     def validate_target_url(self, value):
         if value:
-            parsed = urlsplit(value)
-            if not settings.DEBUG and parsed.scheme.lower() != "https":
-                raise serializers.ValidationError("Ad destination URLs must use HTTPS.")
-            hostname = (parsed.hostname or "").lower().rstrip(".")
-            if hostname in ("localhost", "localhost.localdomain") or hostname.endswith((".local", ".internal", ".test")):
-                raise serializers.ValidationError("Use a public website as the destination for your advertisement.")
+            from config.url_validation import normalize_public_contact_url
             try:
-                if not ip_address(hostname).is_global:
-                    raise serializers.ValidationError("Private network addresses cannot be advertisement destinations.")
-            except ValueError:
-                pass
+                return normalize_public_contact_url(value, require_https=not settings.DEBUG)
+            except ValueError as exc:
+                raise serializers.ValidationError(str(exc)) from exc
         return value
 
     def validate(self, attrs):
         request = self.context.get("request")
         is_admin = bool(request and request.user.is_staff)
+        if "admin_amount_kobo" in getattr(self, "initial_data", {}):
+            raise serializers.ValidationError({"admin_amount_kobo": "Campaign prices come from the selected plan. Edit plan prices in Advertising settings; existing campaigns keep their submitted price."})
         if not is_admin and self.instance is None and not attrs.get("image"):
             raise serializers.ValidationError({"image": "Upload an image for your advertising campaign."})
         if is_admin and self.instance is None and not attrs.get("advertiser_email"):
@@ -123,9 +127,6 @@ class AdCampaignSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"advertiser_email": "Choose an active verified student account."})
             attrs["advertiser"] = advertiser
             attrs.pop("advertiser_email", None)
-        if "admin_amount_kobo" in attrs:
-            if not is_admin: raise serializers.ValidationError({"admin_amount_kobo": "Only administrators can set campaign amounts."})
-            attrs["price_kobo"] = attrs.pop("admin_amount_kobo")
         package = attrs.get("package", getattr(self.instance, "package", None))
         placement = attrs.get("ad_placement", getattr(self.instance, "ad_placement", None))
         placements = attrs.get("ad_placements")
@@ -136,12 +137,19 @@ class AdCampaignSerializer(serializers.ModelSerializer):
             placements = [placement]
         if not placement and placements:
             placement = placements[0]
-        if self.instance and not is_admin:
-            if "package" in attrs and getattr(attrs["package"], "pk", None) != self.instance.package_id:
-                raise serializers.ValidationError({"package": "An ad plan cannot be changed after campaign submission."})
-            if "pages" in attrs and attrs["pages"] != self.instance.pages:
-                raise serializers.ValidationError({"pages": "Ad placements cannot be changed after campaign submission."})
-        if package and not package.is_active:
+        if self.instance:
+            immutable_terms = {
+                "package": (lambda value: getattr(value, "pk", None), self.instance.package_id),
+                "pages": (lambda value: value, self.instance.pages),
+                "ad_placement": (lambda value: getattr(value, "pk", None), self.instance.ad_placement_id),
+                "ad_placements": (lambda value: sorted(item.pk for item in value), sorted(self.instance.ad_placements.values_list("pk", flat=True))),
+                "starts_at": (lambda value: value, self.instance.starts_at),
+                "ends_at": (lambda value: value, self.instance.ends_at),
+            }
+            for field, (normalize, current) in immutable_terms.items():
+                if field in attrs and normalize(attrs[field]) != current:
+                    raise serializers.ValidationError({field: "Campaign plan, price, dates and placements are fixed after submission. Create a new campaign to change those terms."})
+        if package and not self.instance and not package.is_active:
             raise serializers.ValidationError({"package": "Choose an active advertising package."})
         if placement:
             if not placement.is_active:
@@ -151,13 +159,13 @@ class AdCampaignSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"ad_placements": "One or more advertising placements are unavailable."})
             if len({item.pk for item in placements}) != len(placements):
                 raise serializers.ValidationError({"ad_placements": "Choose each placement only once."})
-            if package and len(placements) > package.max_pages:
+            if package and not self.instance and len(placements) > package.max_pages:
                 raise serializers.ValidationError({"ad_placements": f"This plan allows at most {package.max_pages} placement(s)."})
             allowed = set(package.allowed_placements or []) if package else set()
             if package and not allowed:
                 allowed_pages = set(package.allowed_pages or [])
                 allowed = {item.key for item in placements if item.page in allowed_pages}
-            if package and any(item.key not in allowed for item in placements):
+            if package and not self.instance and any(item.key not in allowed for item in placements):
                 raise serializers.ValidationError({"ad_placements": "One or more placements are not included in this plan."})
             attrs["ad_placements"] = placements
             attrs["ad_placement"] = placement
@@ -176,7 +184,7 @@ class AdCampaignSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"pages": "Choose valid advertising pages."})
         if len(set(pages)) != len(pages):
             raise serializers.ValidationError({"pages": "Choose one or more unique advertising pages."})
-        if package and (len(pages) > package.max_pages or not set(pages).issubset(set(package.allowed_pages))):
+        if package and not self.instance and (len(pages) > package.max_pages or not set(pages).issubset(set(package.allowed_pages))):
             raise serializers.ValidationError({"pages": "Selected pages are not included in this advertising plan."})
         attrs["pages"] = pages
         starts = attrs.get("starts_at", getattr(self.instance, "starts_at", None))

@@ -36,12 +36,13 @@ class UserSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(source="public_id", read_only=True)
     profile_picture_url = serializers.SerializerMethodField()
     can_access_student_features = serializers.SerializerMethodField()
+    can_publish_announcements = serializers.SerializerMethodField()
     course_name = serializers.CharField(source="course.name", read_only=True, allow_null=True)
     student_status = serializers.CharField(read_only=True)
     username_change_available_at = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "public_id", "username", "username_change_available_at", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "area", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "is_hostel_agent", "can_access_student_features", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
+        fields = ("id", "public_id", "username", "username_change_available_at", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "area", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "is_hostel_agent", "can_access_student_features", "can_publish_announcements", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
         read_only_fields = fields
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
@@ -51,6 +52,10 @@ class UserSerializer(serializers.ModelSerializer):
     def get_can_access_student_features(self, obj):
         from .permissions import is_student_feature_eligible
         return is_student_feature_eligible(obj)
+
+    def get_can_publish_announcements(self, obj):
+        from apps.administration.permissions import has_announcement_publisher_access
+        return has_announcement_publisher_access(obj)
 
     def get_username_change_available_at(self, obj):
         if not obj.username_changed_at:

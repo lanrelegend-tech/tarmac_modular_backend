@@ -417,6 +417,9 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             ends_at=ends_at,
             duration_days=plan.duration_days,
             price_kobo=plan.price_kobo if platform.ad_fee_enabled and platform.paystack_enabled else 0,
+            plan_name_snapshot=plan.name,
+            plan_price_kobo=plan.price_kobo,
+            payment_required_snapshot=needs_payment,
             advertising_policy_accepted=True,
             advertising_policy_accepted_at=timezone.now(),
         )
@@ -455,11 +458,16 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             campaigns = advertiser.campaigns.all()
         rows = []
         for campaign in campaigns.select_related("ad_placement", "package").prefetch_related("payments", "ad_placements").order_by("-created_at"):
-            payment = campaign.payments.order_by("-created_at").first()
+            payment_rows = list(campaign.payments.order_by("-created_at"))
+            payment = payment_rows[0] if payment_rows else None
+            paid_rows = [item for item in payment_rows if item.status == "success"]
             rows.append({
                 "id": campaign.pk,
                 "business_name": campaign.business_name,
                 "title": campaign.title,
+                "plan_name": campaign.plan_name_snapshot or (campaign.package.name if campaign.package_id else ""),
+                "plan_price_kobo": campaign.plan_price_kobo,
+                "duration_days": campaign.duration_days,
                 "target_url": campaign.target_url,
                 "status": campaign.status,
                 "placement": ", ".join(campaign.ad_placements.values_list("position", flat=True)) or (campaign.ad_placement.position if campaign.ad_placement_id else campaign.placement),
@@ -467,12 +475,16 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
                 "start_date": timezone.localtime(campaign.starts_at).date() if campaign.starts_at else None,
                 "end_date": (timezone.localtime(campaign.ends_at) - timedelta(seconds=1)).date() if campaign.ends_at else None,
                 "amount_kobo": campaign.price_kobo,
+                "payment_required": campaign.payment_required_snapshot,
                 "impressions": campaign.impression_count,
                 "clicks": campaign.click_count,
                 "payment_status": payment.status if payment else None,
                 "refund_status": payment.refund_status if payment else "",
+                "payment_reference": payment.reference if payment else "",
+                "paid_amount_kobo": sum(item.amount_kobo for item in paid_rows),
+                "payment_history": [{"reference": item.reference, "amount_kobo": item.amount_kobo, "currency": item.currency, "status": item.status, "refund_status": item.refund_status, "created_at": item.created_at, "paid_at": item.paid_at} for item in payment_rows],
                 "reviewer_note": campaign.reviewer_note,
-                "paid": bool(payment and payment.status == "success"),
+                "paid": bool(paid_rows),
                 "authorization_url": (payment.provider_response.get("data", {}).get("authorization_url") if payment and payment.status == "initialized" else None),
             })
         return Response({"business_name": advertiser.business_name, "campaigns": rows})
@@ -491,6 +503,8 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             raise ValidationError({"status": "This campaign is already closed."})
         if campaign.payments.filter(status="success").exists():
             raise ValidationError({"status": "This campaign has been paid. Contact Tarmac Support to request cancellation and review any refund."})
+        if campaign.payments.filter(status="initialized").exists():
+            raise ValidationError({"status": "A Paystack checkout is still open for this campaign. Wait for Paystack to confirm its result before cancelling."})
         campaign.status = AdCampaign.Status.CANCELLED
         campaign.save(update_fields=("status", "updated_at"))
         AdSlotHold.objects.filter(campaign=campaign).delete()
@@ -507,16 +521,40 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             from apps.administration.models import AdminLog
             from django.utils import timezone as django_timezone
             package = serializer.validated_data.get("package")
+            if package is None:
+                raise ValidationError({"package": "Choose a plan so this complimentary campaign has clear duration and placement terms."})
             start = serializer.validated_data.get("starts_at") or django_timezone.now()
-            duration_days = package.duration_days if package else 30
+            duration_days = package.duration_days
             end = serializer.validated_data.get("ends_at") or start + timedelta(days=duration_days)
-            campaign = serializer.save(status=AdCampaign.Status.ACTIVE, starts_at=start, ends_at=end, duration_days=duration_days, price_kobo=serializer.validated_data.get("price_kobo", package.price_kobo if package else 0))
-            campaign_placements = list(campaign.ad_placements.all()) or _default_placements_for_pages(campaign.pages)
+            selected_placements = serializer.validated_data.get("ad_placements") or []
+            if not selected_placements:
+                selected_placements = [serializer.validated_data.get("ad_placement")] if serializer.validated_data.get("ad_placement") else _default_placements_for_pages(serializer.validated_data.get("pages", []))
+            if not selected_placements:
+                raise ValidationError({"ad_placements": "Choose at least one active placement."})
+            locked_placements = list(AdPlacement.objects.select_for_update().filter(pk__in=sorted(item.pk for item in selected_placements), is_active=True).order_by("pk"))
+            if len(locked_placements) != len({item.pk for item in selected_placements}):
+                raise ValidationError({"ad_placements": "One or more selected placements are unavailable."})
+            full = [slot for slot in locked_placements if get_slot_availability(slot, start, end)["remaining"] <= 0]
+            if full:
+                raise ValidationError({"availability": f"These placements are fully booked for the selected dates: {', '.join(slot.position for slot in full)}."})
+            campaign = serializer.save(
+                status=AdCampaign.Status.SCHEDULED if start > django_timezone.now() else AdCampaign.Status.ACTIVE,
+                starts_at=start,
+                ends_at=end,
+                duration_days=duration_days,
+                price_kobo=0,
+                plan_name_snapshot=package.name,
+                plan_price_kobo=package.price_kobo,
+                payment_required_snapshot=False,
+            )
+            campaign_placements = locked_placements
             if campaign_placements:
                 campaign.ad_placements.set(campaign_placements)
                 if not campaign.ad_placement_id:
                     campaign.ad_placement = campaign_placements[0]
                     campaign.save(update_fields=("ad_placement", "updated_at"))
+                for slot in campaign_placements:
+                    AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": start, "ends_at": end, "expires_at": end, "is_confirmed": True})
             AdminLog.objects.create(actor=self.request.user, action="admin_ad_campaign_created", target_type="AdCampaign", target_id=str(campaign.pk), metadata={"advertiser_id": campaign.advertiser_id, "price_kobo": campaign.price_kobo})
             return
         package = serializer.validated_data.get("package")
@@ -538,7 +576,17 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             raise ValidationError({"availability": f"These placements are fully booked for the selected dates: {', '.join(slot.position for slot in full)}."})
         needs_payment = platform.ad_fee_enabled and platform.paystack_enabled and package.price_kobo > 0
         initial_status = AdCampaign.Status.PENDING_PAYMENT if needs_payment else AdCampaign.Status.PENDING_REVIEW
-        campaign = serializer.save(advertiser=self.request.user, status=initial_status, starts_at=starts_at, ends_at=ends_at, price_kobo=package.price_kobo if needs_payment else 0, duration_days=package.duration_days)
+        campaign = serializer.save(
+            advertiser=self.request.user,
+            status=initial_status,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            price_kobo=package.price_kobo if needs_payment else 0,
+            duration_days=package.duration_days,
+            plan_name_snapshot=package.name,
+            plan_price_kobo=package.price_kobo,
+            payment_required_snapshot=needs_payment,
+        )
         campaign_placements = list(campaign.ad_placements.all()) or _default_placements_for_pages(campaign.pages)
         if campaign_placements:
             campaign.ad_placements.set(campaign_placements)
@@ -555,32 +603,41 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         if self.request.user.is_staff:
             from apps.administration.models import AdminLog
             campaign = serializer.save(status=current_status)
-            AdminLog.objects.create(actor=self.request.user, action="admin_ad_campaign_updated", target_type="AdCampaign", target_id=str(campaign.pk), metadata={})
+            AdminLog.objects.create(actor=self.request.user, action="admin_ad_campaign_updated", target_type="AdCampaign", target_id=str(campaign.pk), metadata={"changed_fields": sorted(serializer.validated_data.keys())})
             return
-        review_status = AdCampaign.Status.PENDING_PAYMENT if current_status == AdCampaign.Status.PENDING_PAYMENT else AdCampaign.Status.PENDING_REVIEW
-        package = serializer.validated_data.get("package", serializer.instance.package)
-        serializer.save(status=review_status, starts_at=None, ends_at=None, price_kobo=package.price_kobo if package else 0)
+        review_status = current_status if current_status in (AdCampaign.Status.PENDING_PAYMENT, AdCampaign.Status.PENDING_REVIEW) else AdCampaign.Status.PENDING_REVIEW
+        serializer.save(status=review_status)
 
     def perform_destroy(self, instance):
+        from apps.payments.models import Payment
+        if instance.payments.filter(status=Payment.Status.INITIALIZED).exists():
+            raise ValidationError({"status": "A Paystack checkout is still open. Wait for its result before archiving this campaign."})
+        if not self.request.user.is_staff and instance.payments.filter(status=Payment.Status.SUCCESS).exists():
+            raise PermissionDenied("This campaign has a successful payment. Contact Tarmac Support to request cancellation and review any refund.")
         if self.request.user.is_staff:
             from apps.administration.models import AdminLog
-            AdminLog.objects.create(actor=self.request.user, action="ad_campaign_removed", target_type="AdCampaign", target_id=str(instance.pk), metadata={})
+            AdminLog.objects.create(actor=self.request.user, action="ad_campaign_archived", target_type="AdCampaign", target_id=str(instance.pk), metadata={"payment_records_preserved": instance.payments.count(), "previous_status": instance.status})
         elif instance.advertiser_id != self.request.user.id:
             raise PermissionDenied("You can only delete your own ad campaign.")
-        instance.delete()
+        else:
+            from apps.administration.models import AdminLog
+            AdminLog.objects.create(actor=self.request.user, action="advertiser_ad_campaign_cancelled", target_type="AdCampaign", target_id=str(instance.pk), metadata={"previous_status": instance.status})
+        instance.status = AdCampaign.Status.CANCELLED
+        instance.save(update_fields=("status", "updated_at"))
+        AdSlotHold.objects.filter(campaign=instance).delete()
+        placements = list(instance.ad_placements.all()) or ([instance.ad_placement] if instance.ad_placement_id else [])
+        if instance.starts_at and instance.ends_at:
+            for placement in placements:
+                transaction.on_commit(lambda slot=placement: _offer_next_waitlisted(slot, instance.starts_at, instance.ends_at))
 
 
     @action(detail=True, methods=("post",), permission_classes=(IsAdminOrAbove,))
     @transaction.atomic
     def approve(self, request, pk=None):
         campaign = get_object_or_404(AdCampaign.objects.select_for_update(of=("self",)).select_related("business_advertiser", "ad_placement", "package", "advertiser"), pk=pk)
-        platform = PlatformSettings.get_solo()
         from apps.payments.models import Payment
-        payment_required = platform.ad_fee_enabled and platform.paystack_enabled and campaign.price_kobo > 0
-        paid = Payment.objects.filter(advertisement=campaign, status=Payment.Status.SUCCESS, amount_kobo=campaign.price_kobo).exists()
-        if not payment_required and not paid and campaign.price_kobo:
-            campaign.price_kobo = 0
-            campaign.save(update_fields=("price_kobo", "updated_at"))
+        payment_required = campaign.payment_required_snapshot
+        paid = Payment.objects.filter(advertisement=campaign, status=Payment.Status.SUCCESS, amount_kobo=campaign.price_kobo).exclude(refund_status__in=(Payment.RefundStatus.PENDING, Payment.RefundStatus.PROCESSING, Payment.RefundStatus.NEEDS_ATTENTION, Payment.RefundStatus.PROCESSED)).exists()
         if campaign.status != AdCampaign.Status.PENDING_REVIEW:
             raise ValidationError({"status": "Only campaigns awaiting review can be approved."})
         if payment_required and not paid:
@@ -615,7 +672,7 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
                     AdSlotHold.objects.update_or_create(campaign=campaign, placement=placement, defaults={"starts_at": booking_starts_at, "ends_at": booking_ends_at, "expires_at": booking_ends_at, "is_confirmed": True})
         campaign.save(update_fields=("status", "approved_at", "starts_at", "ends_at", "updated_at"))
         if campaign.package_id and campaign.advertiser_id:
-            successful_payment = Payment.objects.filter(advertisement=campaign, status=Payment.Status.SUCCESS).order_by("-paid_at").first()
+            successful_payment = Payment.objects.filter(advertisement=campaign, status=Payment.Status.SUCCESS).exclude(refund_status__in=(Payment.RefundStatus.PENDING, Payment.RefundStatus.PROCESSING, Payment.RefundStatus.NEEDS_ATTENTION, Payment.RefundStatus.PROCESSED)).order_by("-paid_at").first()
             from apps.administration.models import StudentSubscription
             StudentSubscription.objects.get_or_create(ad_campaign=campaign, defaults={"user": campaign.advertiser, "plan": campaign.package, "amount_kobo": successful_payment.amount_kobo if successful_payment else 0, "payment_reference": successful_payment.reference if successful_payment else None, "starts_at": campaign.starts_at, "ends_at": campaign.ends_at})
         from apps.administration.models import AdminLog
@@ -650,6 +707,8 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             raise ValidationError({"reason": "Give the advertiser a clear reason (at least 5 characters)."})
         from apps.payments.models import Payment
         successful_payments = list(Payment.objects.select_for_update().filter(advertisement=campaign, status=Payment.Status.SUCCESS).order_by("created_at"))
+        if not successful_payments and Payment.objects.filter(advertisement=campaign, status=Payment.Status.INITIALIZED).exists():
+            raise ValidationError({"payment": "A Paystack checkout is still open. Wait for its result before rejecting this campaign."})
         refund_requested = request.data.get("refund")
         if successful_payments and not isinstance(refund_requested, bool):
             raise ValidationError({"refund": "Choose whether to refund the successful campaign payment."})
@@ -727,6 +786,9 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         campaign = self.get_object()
         if campaign.status != AdCampaign.Status.ACTIVE:
             raise PermissionDenied("This ad is not active.")
+        from config.url_validation import is_safe_external_url
+        if campaign.target_url and not is_safe_external_url(campaign.target_url, require_https=not settings.DEBUG):
+            raise PermissionDenied("This advertisement has an invalid destination link.")
         AdCampaign.objects.filter(pk=campaign.pk, status=AdCampaign.Status.ACTIVE).update(click_count=F("click_count") + 1)
         return redirect(campaign.target_url or "/")
 

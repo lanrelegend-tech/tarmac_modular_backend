@@ -10,7 +10,11 @@ class Notification(models.Model):
     last_error = models.TextField(blank=True)
     dedupe_key = models.CharField(max_length=180, unique=True, null=True, blank=True)
     class Meta:
-        indexes = [models.Index(fields=("user", "created_at"), name="notification_user_created_idx"), models.Index(fields=("is_sent", "next_attempt_at"), name="notification_delivery_due_idx")]
+        indexes = [
+            models.Index(fields=("user", "created_at"), name="notification_user_created_idx"),
+            models.Index(fields=("user", "channel", "is_read"), name="notification_unread_idx"),
+            models.Index(fields=("is_sent", "next_attempt_at"), name="notification_delivery_due_idx"),
+        ]
 
 
 class PushSubscription(models.Model):

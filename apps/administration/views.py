@@ -6,6 +6,7 @@ import secrets
 import uuid
 from urllib.parse import urlencode
 from django.db import transaction
+from django.core.cache import cache
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import viewsets,permissions, status, generics
@@ -31,9 +32,9 @@ from apps.jobs.models import JobListing, JobReport
 from apps.accommodation.models import AccommodationListing, HostelAgentRequest
 from apps.messaging.models import Conversation, Message
 from apps.messaging.serializers import MessageSerializer
-from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription,EmergencyContact
-from .permissions import IsAdminOrAbove, IsModeratorOrAbove
-from .serializers import UserReportSerializer,AnnouncementSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminAdministratorSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer,EmergencyContactSerializer
+from .models import UserReport,ReportEvidence,Announcement,AnnouncementBookmark,AnnouncementPublisher,AdminLog,PlatformSettings,SupportTicket,SupportMessage,SupportAttachment,SubscriptionPlan,StudentSubscription,EmergencyContact
+from .permissions import IsAdminOrAbove, IsAnnouncementPublisherOrModerator, IsModeratorOrAbove, has_announcement_publisher_access
+from .serializers import UserReportSerializer,AnnouncementSerializer,AnnouncementPublisherSerializer,AdminLogSerializer,AdminVerificationSerializer,AdminReviewSerializer,AdminReviewReportSerializer,AdminAccountSerializer,AdminAdministratorSerializer,AdminConversationSerializer,SubscriptionPlanSerializer,StudentSubscriptionSerializer,SupportTicketSerializer,PlatformSettingsSerializer,AdminPaymentSerializer,AdminLostFoundSerializer,AdminItemClaimSerializer,AdminItemMatchSerializer,AdminProductSerializer,EmergencyContactSerializer
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
 from apps.notifications.services import notify_user
 from config.storage import optimized_image_response
@@ -88,23 +89,35 @@ class UserReportViewSet(viewsets.ModelViewSet):
 class AnnouncementViewSet(viewsets.ModelViewSet):
     serializer_class=AnnouncementSerializer
     def get_queryset(self):
+        if has_announcement_publisher_access(self.request.user):
+            return Announcement.objects.filter(created_by=self.request.user).select_related("created_by").order_by("-created_at")
         if self.request.user.is_staff:
             return Announcement.objects.select_related("created_by").all()
-        return Announcement.objects.none() if not PlatformSettings.get_solo().announcements_enabled else Announcement.objects.filter(is_published=True).filter(
+        return Announcement.objects.none() if not PlatformSettings.get_solo().announcements_enabled else Announcement.objects.filter(is_published=True, is_archived=False).filter(
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
+        ).filter(
             models.Q(audience=Announcement.Audience.ALL_VERIFIED) |
             models.Q(audience=Announcement.Audience.DEPARTMENT, department__iexact=self.request.user.department)
-        ).select_related("created_by")
+        ).select_related("created_by").order_by("-published_at", "-created_at")
     def get_permissions(self):
         if self.action in ("saved", "toggle_saved"):
             return [IsVerifiedStudent()]
         if self.action in ("list", "retrieve"):
             if self.request.user and self.request.user.is_staff:
                 return [IsModeratorOrAbove()]
+            if has_announcement_publisher_access(self.request.user):
+                return [IsAnnouncementPublisherOrModerator()]
             return [IsVerifiedStudent()]
-        return [IsModeratorOrAbove()]
+        if self.action == "pin":
+            return [IsModeratorOrAbove()]
+        return [IsAnnouncementPublisherOrModerator()]
     @action(detail=False, methods=["get"])
     def saved(self, request):
-        ids = AnnouncementBookmark.objects.filter(user=request.user, announcement__is_published=True).values_list("announcement_id", flat=True)
+        ids = AnnouncementBookmark.objects.filter(
+            user=request.user,
+            announcement__is_published=True,
+            announcement__is_archived=False,
+        ).filter(models.Q(announcement__expires_at__isnull=True) | models.Q(announcement__expires_at__gt=timezone.now())).values_list("announcement_id", flat=True)
         return Response({"ids": list(ids)})
     @action(detail=True, methods=["post"], url_path="toggle-saved")
     def toggle_saved(self, request, pk=None):
@@ -115,14 +128,42 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
         return Response({"saved": created, "announcement_id": announcement.pk})
     def perform_create(self, serializer):
         audience = serializer.validated_data.get("audience", Announcement.Audience.ALL_VERIFIED)
+        if has_announcement_publisher_access(self.request.user):
+            if audience != Announcement.Audience.ALL_VERIFIED:
+                raise ValidationError({"audience": "Announcement publishers can post to all verified students only."})
+            if serializer.validated_data.get("pinned", False):
+                raise ValidationError({"pinned": "Only Tarmac moderators can pin announcements."})
         if audience == Announcement.Audience.DEPARTMENT and not serializer.validated_data.get("department", "").strip():
             raise ValidationError({"department": "Choose a department for a department announcement."})
-        serializer.save(created_by=self.request.user)
+        announcement = serializer.save(created_by=self.request.user)
+        AdminLog.objects.create(actor=self.request.user, action="announcement_created", target_type="Announcement", target_id=str(announcement.pk), metadata={"title": announcement.title, "audience": announcement.audience})
+    def perform_update(self, serializer):
+        if has_announcement_publisher_access(self.request.user):
+            audience = serializer.validated_data.get("audience", serializer.instance.audience)
+            pinned = serializer.validated_data.get("pinned", serializer.instance.pinned)
+            if audience != Announcement.Audience.ALL_VERIFIED:
+                raise ValidationError({"audience": "Announcement publishers can post to all verified students only."})
+            if pinned:
+                raise ValidationError({"pinned": "Only Tarmac moderators can pin announcements."})
+        announcement = serializer.save()
+        AdminLog.objects.create(actor=self.request.user, action="announcement_updated", target_type="Announcement", target_id=str(announcement.pk), metadata={"title": announcement.title})
+    def perform_destroy(self, instance):
+        if not instance.is_archived:
+            instance.is_archived = True
+            instance.is_published = False
+            instance.pinned = False
+            instance.archived_at = timezone.now()
+            instance.save(update_fields=("is_archived", "is_published", "pinned", "archived_at"))
+            AdminLog.objects.create(actor=self.request.user, action="announcement_archived", target_type="Announcement", target_id=str(instance.pk), metadata={"title": instance.title, "was_published": bool(instance.published_at)})
     @action(detail=True, methods=["post"])
     def publish(self, request, pk=None):
         if not PlatformSettings.get_solo().announcements_enabled:
             raise ValidationError("Announcements are currently disabled in platform settings.")
         announcement = self.get_object()
+        if announcement.is_archived:
+            raise ValidationError("Restore this archived announcement before publishing it again.")
+        if announcement.expires_at and announcement.expires_at <= timezone.now():
+            raise ValidationError("Choose an expiry date in the future before publishing this announcement.")
         if announcement.is_published:
             return Response({"detail": "This announcement has already been published."}, status=status.HTTP_409_CONFLICT)
         now = timezone.now()
@@ -131,6 +172,15 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
         announcement.save(update_fields=("is_published", "published_at"))
         AdminLog.objects.create(actor=request.user, action="announcement_published", target_type="Announcement", target_id=str(announcement.pk), metadata={"audience":announcement.audience,"department":announcement.department})
         return Response({"published": True, "delivery_queued": True})
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        announcement = self.get_object()
+        if announcement.is_archived:
+            announcement.is_archived = False
+            announcement.archived_at = None
+            announcement.save(update_fields=("is_archived", "archived_at"))
+            AdminLog.objects.create(actor=request.user, action="announcement_restored", target_type="Announcement", target_id=str(announcement.pk), metadata={})
+        return Response({"restored": True, "published": announcement.is_published})
     @action(detail=True, methods=["patch"])
     def pin(self, request, pk=None):
         announcement = self.get_object()
@@ -543,9 +593,13 @@ class SubscriptionPlanViewSet(viewsets.ModelViewSet):
         return queryset if self.request.user.is_staff else queryset.filter(is_active=True)
     def get_permissions(self): return [permissions.AllowAny()] if self.action in ("list", "retrieve") else [IsAdminOrAbove()]
     def perform_create(self, serializer):
-        plan = serializer.save(); AdminLog.objects.create(actor=self.request.user, action="subscription_plan_created", target_type="SubscriptionPlan", target_id=str(plan.pk), metadata={})
+        plan = serializer.save(); AdminLog.objects.create(actor=self.request.user, action="subscription_plan_created", target_type="SubscriptionPlan", target_id=str(plan.pk), metadata={"name": plan.name, "price_kobo": plan.price_kobo, "duration_days": plan.duration_days, "allowed_pages": plan.allowed_pages, "allowed_placements": plan.allowed_placements, "is_active": plan.is_active})
     def perform_update(self, serializer):
-        plan = serializer.save(); AdminLog.objects.create(actor=self.request.user, action="subscription_plan_updated", target_type="SubscriptionPlan", target_id=str(plan.pk), metadata={})
+        instance = serializer.instance
+        before = {"name": instance.name, "price_kobo": instance.price_kobo, "duration_days": instance.duration_days, "allowed_pages": instance.allowed_pages, "allowed_placements": instance.allowed_placements, "is_active": instance.is_active}
+        plan = serializer.save()
+        after = {"name": plan.name, "price_kobo": plan.price_kobo, "duration_days": plan.duration_days, "allowed_pages": plan.allowed_pages, "allowed_placements": plan.allowed_placements, "is_active": plan.is_active}
+        AdminLog.objects.create(actor=self.request.user, action="subscription_plan_updated", target_type="SubscriptionPlan", target_id=str(plan.pk), metadata={"before": before, "after": after, "note": "Changes apply to new campaigns. Existing campaigns retain their submitted package and payment terms."})
 
 class StudentSubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = StudentSubscriptionSerializer
@@ -557,11 +611,14 @@ class StudentSubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
 @api_view(["GET"])
 @drf_permission_classes([IsAdminOrAbove])
 def dashboard(request):
+    cached = cache.get("tarmac.admin.dashboard.v1")
+    if cached is not None:
+        return Response(cached)
     today = timezone.localdate()
     month_start = today.replace(day=1)
     week_start = today - timedelta(days=6)
     payments = Payment.objects.filter(status=Payment.Status.SUCCESS)
-    return Response({
+    payload = {
         "students": {"total": User.objects.filter(role=User.Role.STUDENT).count(), "verified": User.objects.filter(role=User.Role.STUDENT, is_student_verified=True).count(), "unverified": User.objects.filter(role=User.Role.STUDENT, is_student_verified=False).count(), "suspended": User.objects.filter(is_suspended=True).count(), "registered_today": User.objects.filter(date_joined__date=today).count(), "registered_last_7_days": User.objects.filter(date_joined__date__gte=week_start).count(), "registered_this_month": User.objects.filter(date_joined__date__gte=month_start).count()},
         "marketplace": {"active": Product.objects.filter(status=Product.Status.ACTIVE).count(), "pending_review": Product.objects.filter(status=Product.Status.PENDING_REVIEW).count(), "expired": Product.objects.filter(status=Product.Status.EXPIRED).count(), "reported": UserReport.objects.filter(product__isnull=False, is_resolved=False).count(), "completed_sales": Product.objects.filter(status=Product.Status.SOLD).count(), "top_categories": list(Product.objects.filter(status=Product.Status.ACTIVE).values("category__name").annotate(listings=Count("id")).order_by("-listings")[:10]), "active_sellers": list(User.objects.filter(products__status=Product.Status.ACTIVE).values("id", "username").annotate(listings=Count("products")).order_by("-listings")[:10])},
         "payments": {"successful_count": payments.count(), "successful_revenue_kobo": payments.aggregate(total=Sum("amount_kobo"))["total"] or 0, "this_month_revenue_kobo": payments.filter(paid_at__date__gte=month_start).aggregate(total=Sum("amount_kobo"))["total"] or 0, "failed_count": Payment.objects.filter(status=Payment.Status.FAILED).count()},
@@ -582,14 +639,19 @@ def dashboard(request):
             "open_job_reports": JobReport.objects.filter(status__in=(JobReport.Status.OPEN, JobReport.Status.REVIEWING)).count(),
             "waiting_advertisers": AdWaitlistEntry.objects.filter(status=AdWaitlistEntry.Status.WAITING).count(),
         },
-    })
+    }
+    cache.set("tarmac.admin.dashboard.v1", payload, 15)
+    return Response(payload)
 
 
 @api_view(["GET"])
 @drf_permission_classes([IsModeratorOrAbove])
 def queue_counts(request):
     """Small navigation badge payload; avoids fetching full admin dashboard data."""
-    return Response({
+    cached = cache.get("tarmac.admin.queue_counts.v1")
+    if cached is not None:
+        return Response(cached)
+    payload = {
         "verification": StudentVerification.objects.filter(status=StudentVerification.Status.PENDING).count(),
         "profile_changes": ProfileChangeRequest.objects.filter(status=ProfileChangeRequest.Status.PENDING).count(),
         "marketplace": Product.objects.filter(status=Product.Status.PENDING_REVIEW).count(),
@@ -600,7 +662,9 @@ def queue_counts(request):
         "reviews": SellerReview.objects.filter(status=SellerReview.Status.PENDING).count() + ReviewReport.objects.filter(status__in=(ReviewReport.Status.OPEN, ReviewReport.Status.REVIEWING)).count(),
         "ads": AdCampaign.objects.filter(status=AdCampaign.Status.PENDING_REVIEW).count() + AdWaitlistEntry.objects.filter(status=AdWaitlistEntry.Status.WAITING).count(),
         "support": SupportTicket.objects.filter(status__in=(SupportTicket.Status.OPEN, SupportTicket.Status.IN_PROGRESS)).count(),
-    })
+    }
+    cache.set("tarmac.admin.queue_counts.v1", payload, 5)
+    return Response(payload)
 
 @api_view(["GET"])
 @drf_permission_classes([IsAdminOrAbove])
@@ -611,6 +675,10 @@ def analytics(request):
         raise ValidationError({"days": "Choose a period of 7, 30, or 90 days."})
     if days not in (7, 30, 90):
         raise ValidationError({"days": "Choose a period of 7, 30, or 90 days."})
+    cache_key = f"tarmac.admin.analytics.v1.{days}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return Response(cached)
     start = timezone.localdate() - timedelta(days=days - 1)
     registrations = {row["day"].isoformat(): row["total"] for row in User.objects.filter(date_joined__date__gte=start).annotate(day=TruncDate("date_joined")).values("day").annotate(total=Count("id"))}
     payments = {row["day"].isoformat(): row for row in Payment.objects.filter(status=Payment.Status.SUCCESS, paid_at__date__gte=start).annotate(day=TruncDate("paid_at")).values("day").annotate(count=Count("id"), revenue_kobo=Sum("amount_kobo"))}
@@ -620,7 +688,9 @@ def analytics(request):
         day = (start + timedelta(days=offset)).isoformat()
         payment = payments.get(day, {})
         series.append({"date": day, "registrations": registrations.get(day, 0), "payments": payment.get("count", 0), "revenue_kobo": payment.get("revenue_kobo") or 0, "lost_found_reports": lost_found.get(day, 0)})
-    return Response({"days": days, "series": series, "totals": {"registrations": sum(row["registrations"] for row in series), "payments": sum(row["payments"] for row in series), "revenue_kobo": sum(row["revenue_kobo"] for row in series), "lost_found_reports": sum(row["lost_found_reports"] for row in series)}})
+    payload = {"days": days, "series": series, "totals": {"registrations": sum(row["registrations"] for row in series), "payments": sum(row["payments"] for row in series), "revenue_kobo": sum(row["revenue_kobo"] for row in series), "lost_found_reports": sum(row["lost_found_reports"] for row in series)}}
+    cache.set(cache_key, payload, 60)
+    return Response(payload)
 
 @api_view(["POST"])
 @drf_permission_classes([IsAdminOrAbove])
@@ -817,6 +887,12 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         for upload in uploads:
             if upload.size > 5 * 1024 * 1024 or upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
                 raise ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files no larger than 5 MB."})
+            if upload.content_type == "application/pdf":
+                from config.upload_validation import validate_pdf_upload
+                try:
+                    validate_pdf_upload(upload)
+                except ValueError as error:
+                    raise ValidationError({"attachment_files": str(error)}) from error
         if ticket.status == SupportTicket.Status.RESOLVED and not request.user.is_staff:
             raise ValidationError({"status": "This ticket is resolved. Ask an administrator to reopen it."})
         from django.utils.text import get_valid_filename
@@ -857,12 +933,74 @@ def support_attachment_file(request, attachment_id):
     if not is_admin and attachment.message.ticket.user_id != request.user.pk:
         from rest_framework.exceptions import PermissionDenied
         raise PermissionDenied("You cannot view attachments for another student's support ticket.")
-    return FileResponse(attachment.file.open("rb"), content_type=attachment.content_type)
+    is_image = attachment.content_type == "image/webp"
+    response = FileResponse(
+        attachment.file.open("rb"),
+        content_type="image/webp" if is_image else "application/pdf",
+        as_attachment=not is_image,
+        filename=attachment.original_name if not is_image else None,
+    )
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Cache-Control"] = "private, no-store"
+    response["Vary"] = "Cookie"
+    return response
 
 class IsSuperUser(permissions.BasePermission):
     message = "Only a superuser can change platform-wide settings."
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+
+class AnnouncementPublisherAccessViewSet(viewsets.GenericViewSet):
+    serializer_class = AnnouncementPublisherSerializer
+    permission_classes = [IsSuperUser]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        return AnnouncementPublisher.objects.select_related("user", "granted_by").all()
+
+    def list(self, request):
+        return Response(self.get_serializer(self.get_queryset(), many=True).data)
+
+    @transaction.atomic
+    def create(self, request):
+        email = str(request.data.get("email", "")).strip()
+        if not email:
+            raise ValidationError({"email": "Enter the email address of an existing account with a verified email."})
+        account = User.objects.select_for_update().filter(email__iexact=email).first()
+        if account is None:
+            raise ValidationError({"email": "No account exists with that email. Ask the representative to register first."})
+        if account.is_staff or account.is_superuser:
+            raise ValidationError({"email": "Choose a non-staff account. Staff already manage announcements through their staff role."})
+        if not account.email_verified or not account.is_active or account.is_suspended or account.deleted_at:
+            raise ValidationError({"email": "The account must be active, not suspended or deleted, and have a verified email."})
+
+        access = AnnouncementPublisher.objects.select_for_update().filter(user=account).first()
+        if access and access.is_active:
+            return Response(self.get_serializer(access).data)
+        created = access is None
+        if created:
+            access = AnnouncementPublisher.objects.create(user=account, granted_by=request.user)
+        else:
+            access.granted_by = request.user
+            access.is_active = True
+            access.revoked_at = None
+            access.save(update_fields=("granted_by", "is_active", "revoked_at", "updated_at"))
+        AdminLog.objects.create(actor=request.user, action="announcement_publisher_access_granted", target_type="User", target_id=str(account.pk), metadata={"email": account.email})
+        notify_user(account, "Announcement publishing access granted", "You can now post school announcements for verified Tarmac students. Use the Announcement Publisher link in your Tarmac dashboard. This permission does not grant access to the admin panel.", {"kind": "announcement_publisher_access", "notification_category": "official", "url": "/announcement-publisher", "link": "/announcement-publisher"}, f"announcement-publisher-granted:{account.pk}:{access.updated_at.timestamp()}", dispatch_email=True)
+        return Response(self.get_serializer(access).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    @action(detail=True, methods=("post",), url_path="revoke")
+    @transaction.atomic
+    def revoke(self, request, pk=None):
+        access = get_object_or_404(self.get_queryset().select_for_update(), pk=pk)
+        if access.is_active:
+            access.is_active = False
+            access.revoked_at = timezone.now()
+            access.save(update_fields=("is_active", "revoked_at", "updated_at"))
+            AdminLog.objects.create(actor=request.user, action="announcement_publisher_access_revoked", target_type="User", target_id=str(access.user_id), metadata={"email": access.user.email})
+            notify_user(access.user, "Announcement publishing access removed", "Your permission to publish announcements on Tarmac has been removed. Your normal account is unchanged.", {"kind": "announcement_publisher_access", "notification_category": "official"}, f"announcement-publisher-revoked:{access.user_id}:{access.updated_at.timestamp()}", dispatch_email=True)
+        return Response(self.get_serializer(access).data)
 
 
 class AdminAdministratorViewSet(viewsets.GenericViewSet):
@@ -1008,6 +1146,24 @@ class AdminPaymentViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         return Payment.objects.select_related("user", "product", "advertisement", "subscription_plan").order_by("-created_at")
 
+    @action(detail=False, methods=("get",), url_path="advertisement-summary")
+    def advertisement_summary(self, request):
+        groups = Payment.objects.filter(advertisement__isnull=False).values("status", "refund_status").annotate(total=Sum("amount_kobo"), count=models.Count("pk"))
+        summary = {"gross_paid_kobo": 0, "refunded_kobo": 0, "net_revenue_kobo": 0, "successful_count": 0, "pending_count": 0, "failed_count": 0}
+        for row in groups:
+            amount = row["total"] or 0
+            if row["status"] == Payment.Status.SUCCESS:
+                summary["gross_paid_kobo"] += amount
+                summary["successful_count"] += row["count"]
+                if row["refund_status"] == Payment.RefundStatus.PROCESSED:
+                    summary["refunded_kobo"] += amount
+            elif row["status"] == Payment.Status.INITIALIZED:
+                summary["pending_count"] += row["count"]
+            elif row["status"] == Payment.Status.FAILED:
+                summary["failed_count"] += row["count"]
+        summary["net_revenue_kobo"] = summary["gross_paid_kobo"] - summary["refunded_kobo"]
+        return Response(summary)
+
     @action(detail=True, methods=("post",), url_path="refund")
     @transaction.atomic
     def refund(self, request, pk=None):
@@ -1121,6 +1277,7 @@ class AdminProductViewSet(viewsets.ModelViewSet):
     permission_classes = [IsModeratorOrAbove]
     http_method_names = ["get", "patch", "head", "options"]
     def get_queryset(self):
+        Product.objects.filter(status=Product.Status.ACTIVE, expires_at__lte=timezone.now()).update(status=Product.Status.EXPIRED)
         return Product.objects.select_related("seller", "category").prefetch_related("images").order_by("-created_at")
     @action(detail=True, methods=("get",), url_path="image")
     def image(self, request, pk=None):

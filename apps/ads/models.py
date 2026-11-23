@@ -28,6 +28,11 @@ class AdCampaign(models.Model):
     ad_placement = models.ForeignKey("ads.AdPlacement", on_delete=models.PROTECT, related_name="campaigns", null=True, blank=True)
     ad_placements = models.ManyToManyField("ads.AdPlacement", related_name="multi_page_campaigns", blank=True)
     package = models.ForeignKey("administration.SubscriptionPlan", null=True, blank=True, on_delete=models.SET_NULL, related_name="ad_campaigns")
+    # Keep the package terms that the advertiser accepted. The linked plan is
+    # editable by admins for future campaigns, so it is not a historical record.
+    plan_name_snapshot = models.CharField(max_length=100, blank=True)
+    plan_price_kobo = models.PositiveIntegerField(default=0)
+    payment_required_snapshot = models.BooleanField(default=False)
     business_name = models.CharField(max_length=120, blank=True)
     pages = models.JSONField(default=list, blank=True)
     display_image = models.CharField(max_length=500, blank=True)

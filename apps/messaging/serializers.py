@@ -170,6 +170,12 @@ class BlockedUserSerializer(serializers.ModelSerializer):
         for upload in uploads:
             if upload.size > 5 * 1024 * 1024 or upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
                 raise serializers.ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files no larger than 5 MB."})
+            if upload.content_type == "application/pdf":
+                from config.upload_validation import validate_pdf_upload
+                try:
+                    validate_pdf_upload(upload)
+                except ValueError as error:
+                    raise serializers.ValidationError({"attachment_files": str(error)}) from error
         return attrs
 
     @transaction.atomic

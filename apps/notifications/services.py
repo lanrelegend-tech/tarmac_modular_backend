@@ -186,6 +186,9 @@ def _send_email(notification):
     elif kind == "account_enforcement":
         action_url = data.get("appeal_url") or f"{origin}/login"
         action_label = "Submit an appeal" if data.get("appeal_url") else "Sign in to Tarmac"
+    elif kind == "announcement_publisher_access":
+        action_url = f"{origin}/announcement-publisher" if data.get("url") else f"{origin}/dashboard"
+        action_label = "Open Announcement Publisher" if data.get("url") else "Open Tarmac"
     elif kind in ("conversation_completed", "conversation_completion_requested"):
         conversation_id = data.get("conversation_id")
         action_url = f"{origin}/messages?conversation={conversation_id}" if conversation_id else f"{origin}/messages"

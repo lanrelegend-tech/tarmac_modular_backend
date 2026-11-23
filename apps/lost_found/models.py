@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 from django.core.files.storage import FileSystemStorage
 from django.utils.deconstruct import deconstructible
 from uuid import uuid4
@@ -18,7 +19,7 @@ class LostFoundReport(models.Model):
     reporter=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="lost_found_reports"); report_type=models.CharField(max_length=10,choices=Type.choices)
     campus=models.CharField(max_length=120, db_index=True, blank=True); title=models.CharField(max_length=160); description=models.TextField(); category=models.ForeignKey("products.Category",null=True,blank=True,on_delete=models.SET_NULL)
     colour=models.CharField(max_length=60,blank=True); location=models.CharField(max_length=160); incident_date=models.DateField(); identifying_details=models.TextField(blank=True); contact_details=models.CharField(max_length=160, blank=True)
-    image=models.ImageField(upload_to="lost_found/",blank=True,null=True); status=models.CharField(max_length=20,choices=Status.choices,default=Status.OPEN); is_active=models.BooleanField(default=True); matching_processed=models.BooleanField(default=False); created_at=models.DateTimeField(auto_now_add=True)
+    image=models.ImageField(upload_to="lost_found/",blank=True,null=True); status=models.CharField(max_length=20,choices=Status.choices,default=Status.OPEN); is_active=models.BooleanField(default=True); matching_processed=models.BooleanField(default=False); created_at=models.DateTimeField(auto_now_add=True); deleted_at=models.DateTimeField(null=True, blank=True, db_index=True)
     class Meta:
         indexes = [models.Index(fields=("report_type", "is_active", "status"), name="lostfound_active_type_idx"), models.Index(fields=("category", "report_type", "is_active"), name="lostfound_category_type_idx"), models.Index(fields=("incident_date",), name="lostfound_date_idx")]
 class ItemMatch(models.Model):

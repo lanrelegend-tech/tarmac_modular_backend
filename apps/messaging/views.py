@@ -6,12 +6,12 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.permissions import PlatformFeatureEnabled
 from django.utils import timezone
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count, Exists, IntegerField, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
-import mimetypes
 from .models import Conversation,Message,MessageAttachment
 from .serializers import ConversationSerializer,MessageSerializer,BlockedUserSerializer
 from .models import BlockedUser
@@ -36,10 +36,15 @@ class ConversationViewSet(viewsets.ModelViewSet):
         return queryset.distinct()
     @action(detail=False, methods=["get"], url_path="unread-count")
     def unread_count(self, request):
+        cache_key = f"tarmac.messaging.unread-count.{request.user.pk}"
+        cached_count = cache.get(cache_key)
+        if cached_count is not None:
+            return Response({"count": cached_count})
         count = Message.objects.filter(
             conversation__participants=request.user,
             read_at__isnull=True,
         ).exclude(sender=request.user).count()
+        cache.set(cache_key, count, 3)
         return Response({"count": count})
     def create(self, request, *args, **kwargs):
         raise PermissionDenied("Start a conversation from a marketplace listing, lost-and-found match, or official support message.")
@@ -298,8 +303,13 @@ def message_attachment_file(request, attachment_id):
     attachment = get_object_or_404(MessageAttachment.objects.select_related("message__conversation"), pk=attachment_id)
     if not request.user.is_staff and not attachment.message.conversation.participants.filter(pk=request.user.pk).exists():
         raise PermissionDenied("You are not a participant in this conversation.")
-    content_type = attachment.content_type or mimetypes.guess_type(attachment.file.name)[0] or "application/octet-stream"
-    response = FileResponse(attachment.file.open("rb"), content_type=content_type)
+    is_image = attachment.content_type == "image/webp"
+    response = FileResponse(
+        attachment.file.open("rb"),
+        content_type="image/webp" if is_image else "application/pdf",
+        as_attachment=not is_image,
+        filename=attachment.original_name if not is_image else None,
+    )
     response["Cache-Control"] = "private, max-age=600"
     response["Vary"] = "Cookie"
     response["X-Content-Type-Options"] = "nosniff"

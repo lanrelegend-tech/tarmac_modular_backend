@@ -1,6 +1,6 @@
-import mimetypes
 from django.db import models, transaction
 from django.db.models import Count
+from django.utils import timezone
 from django.http import FileResponse
 from rest_framework import viewsets, permissions
 from rest_framework.exceptions import PermissionDenied
@@ -13,6 +13,7 @@ from .models import LostFoundReport,ItemMatch,ItemMatchReview,ItemClaim
 from .serializers import LostFoundReportSerializer,ItemMatchSerializer,ItemClaimSerializer
 from .services import create_possible_matches
 from apps.notifications.services import notify_user
+from apps.administration.models import AdminLog
 from config.storage import optimized_image_response
 from apps.messaging.models import Conversation, BlockedUser
 from apps.messaging.serializers import ConversationSerializer
@@ -22,7 +23,7 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
     search_fields = ["title", "description", "location", "colour", "identifying_details"]
     filterset_fields = ["id", "public_id", "report_type", "category", "status"]
     def get_queryset(self):
-        queryset = LostFoundReport.objects.select_related("reporter").filter(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
+        queryset = LostFoundReport.objects.select_related("reporter", "category").filter(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
         campus = self.request.query_params.get("campus")
         return queryset.filter(campus__iexact=campus.strip()[:120]) if campus else queryset
     def perform_create(self,serializer):
@@ -34,7 +35,17 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         if instance.reporter_id != self.request.user.id:
             raise PermissionDenied("You can only delete your own report.")
-        instance.delete()
+        instance.status = LostFoundReport.Status.CLOSED
+        instance.is_active = False
+        instance.deleted_at = timezone.now()
+        instance.save(update_fields=("status", "is_active", "deleted_at"))
+        AdminLog.objects.create(
+            actor=self.request.user,
+            action="lost_found_report_owner_deleted",
+            target_type="LostFoundReport",
+            target_id=str(instance.pk),
+            metadata={"report_type": instance.report_type, "title": instance.title},
+        )
     @action(detail=True, methods=["get"], url_path="image-file")
     def image_file(self, request, pk=None):
         report = self.get_object()
@@ -142,5 +153,14 @@ class ItemClaimViewSet(viewsets.ModelViewSet):
     def evidence_file(self, request, pk=None):
         claim = self.get_object()
         if not claim.evidence: raise PermissionDenied("No evidence is attached to this claim.")
-        content_type = mimetypes.guess_type(claim.evidence.name)[0] or "application/octet-stream"
-        return FileResponse(claim.evidence.open("rb"), content_type=content_type)
+        is_image = claim.evidence.name.lower().endswith(".webp")
+        response = FileResponse(
+            claim.evidence.open("rb"),
+            content_type="image/webp" if is_image else "application/pdf",
+            as_attachment=not is_image,
+            filename="claim-evidence.webp" if is_image else "claim-evidence.pdf",
+        )
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Cache-Control"] = "private, no-store"
+        response["Vary"] = "Cookie"
+        return response

@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from django.conf import settings
+from django.core.cache import cache
 from .models import PushSubscription
 from apps.accounts.permissions import IsVerifiedStudent
 from .models import Notification
@@ -28,15 +29,25 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
             PushSubscription.objects.filter(user=request.user, endpoint=endpoint).delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
         subscription = request.data.get("subscription") or {}
+        if not isinstance(subscription, dict):
+            raise ValidationError({"subscription": "Provide a valid browser push subscription."})
         keys = subscription.get("keys") or {}
+        if not isinstance(keys, dict):
+            raise ValidationError({"subscription": "Provide a valid browser push subscription."})
         endpoint = subscription.get("endpoint", "")
-        if not endpoint.startswith("https://") or not keys.get("p256dh") or not keys.get("auth"):
+        from config.push_validation import validate_push_subscription
+        if not validate_push_subscription(endpoint, keys.get("p256dh"), keys.get("auth")):
             raise ValidationError({"subscription": "Provide a valid browser push subscription."})
         PushSubscription.objects.update_or_create(endpoint=endpoint, defaults={"user": request.user, "p256dh": keys["p256dh"], "auth": keys["auth"]})
         return Response({"enabled": True}, status=status.HTTP_201_CREATED)
     @action(detail=False, methods=["get"], url_path="unread-count")
     def unread_count(self, request):
-        return Response({"count": self.get_queryset().filter(is_read=False).count()})
+        cache_key = f"tarmac.notifications.unread-count.{request.user.pk}"
+        count = cache.get(cache_key)
+        if count is None:
+            count = self.get_queryset().filter(is_read=False).count()
+            cache.set(cache_key, count, 3)
+        return Response({"count": count})
     def destroy(self, request, *args, **kwargs):
         notification = self.get_object()
         notification.delete()
