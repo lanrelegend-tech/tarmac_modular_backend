@@ -76,7 +76,6 @@ class StudentPublicProfileSerializer(serializers.ModelSerializer):
         if not instance.public_name_enabled:
             data["first_name"] = ""
             data["last_name"] = ""
-            data["username"] = "Student"
         if not instance.public_department_enabled:
             data["department"] = ""
             data["faculty"] = ""
