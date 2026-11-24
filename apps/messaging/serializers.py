@@ -120,6 +120,39 @@ class MessageSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("A message cannot be moved to another conversation.")
         return conversation
 
+    def validate(self, attrs):
+        uploads = attrs.get("attachment_files", [])
+        if not str(attrs.get("body", "")).strip() and not uploads:
+            raise serializers.ValidationError({"body": "Write a message or attach a file."})
+        for upload in uploads:
+            if upload.size > 5 * 1024 * 1024 or upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
+                raise serializers.ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files no larger than 5 MB."})
+            if upload.content_type == "application/pdf":
+                from config.upload_validation import validate_pdf_upload
+                try:
+                    validate_pdf_upload(upload)
+                except ValueError as error:
+                    raise serializers.ValidationError({"attachment_files": str(error)}) from error
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        uploads = validated_data.pop("attachment_files", [])
+        message = Message.objects.create(**validated_data)
+        for upload in uploads:
+            original_name = get_valid_filename(upload.name)[:255]
+            if upload.content_type.startswith("image/"):
+                from config.storage import optimize_uploaded_image
+                try:
+                    optimized = optimize_uploaded_image(upload, max_size=(1440, 1440), quality=78)
+                except ValueError as error:
+                    raise serializers.ValidationError({"attachment_files": str(error)}) from error
+                optimized.name = f"{original_name.rsplit('.', 1)[0]}.webp"
+                MessageAttachment.objects.create(message=message, file=optimized, original_name=original_name, content_type="image/webp")
+            else:
+                MessageAttachment.objects.create(message=message, file=upload, original_name=original_name, content_type=upload.content_type)
+        return message
+
 
 def create_participant_snapshot(conversation, user, identity_type="normal", name=None):
     from apps.accounts.models import AnonymousMarketplaceIdentity
@@ -168,36 +201,3 @@ class BlockedUserSerializer(serializers.ModelSerializer):
     def get_display_name(self, obj):
         user = obj.blocked_user
         return (user.get_full_name().strip() if user.public_name_enabled else "") or user.username
-
-    def validate(self, attrs):
-        uploads = attrs.get("attachment_files", [])
-        if not str(attrs.get("body", "")).strip() and not uploads:
-            raise serializers.ValidationError({"body": "Write a message or attach a file."})
-        for upload in uploads:
-            if upload.size > 5 * 1024 * 1024 or upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
-                raise serializers.ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files no larger than 5 MB."})
-            if upload.content_type == "application/pdf":
-                from config.upload_validation import validate_pdf_upload
-                try:
-                    validate_pdf_upload(upload)
-                except ValueError as error:
-                    raise serializers.ValidationError({"attachment_files": str(error)}) from error
-        return attrs
-
-    @transaction.atomic
-    def create(self, validated_data):
-        uploads = validated_data.pop("attachment_files", [])
-        message = Message.objects.create(**validated_data)
-        for upload in uploads:
-            original_name = get_valid_filename(upload.name)[:255]
-            if upload.content_type.startswith("image/"):
-                from config.storage import optimize_uploaded_image
-                try:
-                    optimized = optimize_uploaded_image(upload, max_size=(1440, 1440), quality=78)
-                except ValueError as error:
-                    raise serializers.ValidationError({"attachment_files": str(error)}) from error
-                optimized.name = f"{original_name.rsplit('.', 1)[0]}.webp"
-                MessageAttachment.objects.create(message=message, file=optimized, original_name=original_name, content_type="image/webp")
-            else:
-                MessageAttachment.objects.create(message=message, file=upload, original_name=original_name, content_type=upload.content_type)
-        return message
