@@ -110,3 +110,5 @@ def process_possible_matches(report):
     for match in new_matches:
         if (match.lost_report_id, match.found_report_id) in new_pairs:
             notify_possible_match(match)
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("lost_found", "Potential Lost & Found match needs review", f'A possible match was detected for "{match.lost_report.title}".', {"kind": "item_match_review", "match_id": match.pk}, f"item-match-review:{match.pk}")

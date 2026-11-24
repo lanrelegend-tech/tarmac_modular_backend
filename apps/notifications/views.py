@@ -6,18 +6,41 @@ from rest_framework import status
 from rest_framework.exceptions import ValidationError
 from django.conf import settings
 from django.core.cache import cache
+from django.db.models import Q
 from .models import PushSubscription
-from apps.accounts.permissions import IsVerifiedStudent
+from rest_framework.permissions import BasePermission
+from apps.accounts.permissions import is_student_feature_eligible
 from .models import Notification
 from .serializers import NotificationSerializer
-class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
-    serializer_class=NotificationSerializer; permission_classes=[IsVerifiedStudent]
+from config.throttles import ActionRateLimitMixin
+
+
+class CanReceiveTarmacNotifications(BasePermission):
+    message = "An active Tarmac account is required."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated and user.is_active and not user.is_suspended):
+            return False
+        return bool(user.is_staff or is_student_feature_eligible(user))
+
+
+class NotificationViewSet(ActionRateLimitMixin, viewsets.ReadOnlyModelViewSet):
+    action_throttle_scopes = {
+        "push_subscription": "push_subscription_write",
+        "mark_read": "push_subscription_write",
+    }
+    serializer_class=NotificationSerializer; permission_classes=[CanReceiveTarmacNotifications]
     http_method_names = ["get", "post", "delete", "head", "options"]
     def get_queryset(self):
-        return Notification.objects.filter(
+        queryset = Notification.objects.filter(
             user=self.request.user,
             channel=Notification.Channel.IN_APP,
-        ).order_by("-created_at", "-id")
+        )
+        if self.request.user.is_staff and not self.request.user.is_superuser:
+            assigned = self.request.user.staff_notification_sections or []
+            queryset = queryset.filter(Q(data__staff_section__in=assigned) | Q(data__notification_category="account_security"))
+        return queryset.order_by("-created_at", "-id")
     @action(detail=False, methods=["get", "post", "delete"], url_path="push-subscription")
     def push_subscription(self, request):
         if request.method == "GET":

@@ -55,6 +55,9 @@ def confirm_successful_payment(reference, data):
                     product.featured_until = timezone.now() + timedelta(days=product.sponsorship_duration_days)
                     update_fields.extend(("is_featured", "featured_until"))
             product.save(update_fields=update_fields)
+            if product.status == Product.Status.PENDING_REVIEW:
+                from apps.notifications.staff import notify_staff_section
+                notify_staff_section("marketplace", "Marketplace listing needs review", f'"{product.title}" was paid for and is waiting for approval.', {"kind": "product_review", "product_id": product.pk}, f"product-review:{product.pk}")
             if payment.user_id:
                 notify_user(
                     payment.user,
@@ -84,6 +87,8 @@ def confirm_successful_payment(reference, data):
                     )
             campaign.status = AdCampaign.Status.PENDING_REVIEW
             campaign.save(update_fields=("status", "updated_at"))
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("ads", "Advertisement needs review", f'"{campaign.title}" payment was confirmed and it is waiting for approval.', {"kind": "ad_review", "campaign_id": campaign.pk}, f"ad-review:{campaign.pk}")
             conflict_names = ", ".join(slot.position for slot in full_slots)
             if campaign.business_advertiser_id:
                 message = (

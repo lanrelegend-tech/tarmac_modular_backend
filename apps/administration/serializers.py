@@ -3,7 +3,7 @@ from rest_framework import serializers
 from django.utils import timezone
 from apps.accounts.models import StudentVerification, User, AnonymousMarketplaceIdentity
 from apps.reviews.models import ReviewReport, SellerReview
-from .models import UserReport,ReportEvidence,Announcement,AnnouncementPublisher,AdminLog,SupportTicket,SupportMessage,SupportAttachment,PlatformSettings,SubscriptionPlan,StudentSubscription,EmergencyContact,default_notification_channels
+from .models import UserReport,ReportEvidence,Announcement,AnnouncementImage,AnnouncementPublisher,AdminLog,SupportTicket,SupportMessage,SupportAttachment,PlatformSettings,SubscriptionPlan,StudentSubscription,EmergencyContact,default_notification_channels
 from apps.ads.models import AdPlacement
 from .campuses import clean_campus_list, clean_campus_areas, validate_campus_choice
 class UserReportSerializer(serializers.ModelSerializer):
@@ -132,8 +132,12 @@ class UserReportSerializer(serializers.ModelSerializer):
         return data
 class AnnouncementSerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField()
+    poster_name = serializers.CharField(max_length=120, required=True)
     image = serializers.ImageField(required=False, allow_null=True, write_only=True)
     image_url = serializers.SerializerMethodField()
+    image_urls = serializers.SerializerMethodField()
+    gallery_images = serializers.ListField(child=serializers.ImageField(), required=False, write_only=True, max_length=5)
+    clear_gallery = serializers.BooleanField(required=False, write_only=True, default=False)
     class Meta: model=Announcement; fields="__all__"; read_only_fields=("created_by","created_by_name","created_at","is_published","is_archived","archived_at","published_at","delivery_cursor","delivery_completed","recipient_count")
 
     def get_image_url(self, obj):
@@ -145,6 +149,72 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         if image and image.size > 5 * 1024 * 1024:
             raise serializers.ValidationError("Announcement images must be 5 MB or smaller.")
         return image
+
+    def validate_poster_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Choose the name students should see on this announcement.")
+        return value
+
+    def validate_gallery_images(self, images):
+        if any(image.size > 5 * 1024 * 1024 for image in images):
+            raise serializers.ValidationError("Each announcement image must be 5 MB or smaller.")
+        return images
+
+    def get_image_urls(self, obj):
+        gallery = list(obj.gallery_images.all())
+        if gallery:
+            return [item.image.url for item in gallery]
+        return [obj.image.url] if obj.image else []
+
+    def _clear_gallery(self, announcement):
+        old_images = list(announcement.gallery_images.all())
+        for item in old_images:
+            item.image.delete(save=False)
+        if old_images:
+            AnnouncementImage.objects.filter(pk__in=[item.pk for item in old_images]).delete()
+        if announcement.image:
+            announcement.image.delete(save=False)
+        announcement.image = None
+        announcement.save(update_fields=("image",))
+
+    def _replace_gallery(self, announcement, images):
+        created = []
+        try:
+            for index, image in enumerate(images):
+                created.append(AnnouncementImage.objects.create(announcement=announcement, image=image, sort_order=index))
+        except Exception:
+            for item in created:
+                item.image.delete(save=False)
+                item.delete()
+            raise
+        old_images = list(announcement.gallery_images.exclude(pk__in=[item.pk for item in created]))
+        for item in old_images:
+            item.image.delete(save=False)
+        if old_images:
+            AnnouncementImage.objects.filter(pk__in=[item.pk for item in old_images]).delete()
+        if announcement.image:
+            announcement.image.delete(save=False)
+        announcement.image = None
+        announcement.save(update_fields=("image",))
+
+    def create(self, validated_data):
+        images = validated_data.pop("gallery_images", None)
+        validated_data.pop("clear_gallery", None)
+        announcement = super().create(validated_data)
+        if images is not None:
+            self._replace_gallery(announcement, images)
+        return announcement
+
+    def update(self, instance, validated_data):
+        images = validated_data.pop("gallery_images", None)
+        clear_gallery = validated_data.pop("clear_gallery", False)
+        announcement = super().update(instance, validated_data)
+        if images is not None:
+            self._replace_gallery(announcement, images)
+        elif clear_gallery:
+            self._clear_gallery(announcement)
+        return announcement
 
     def get_created_by_name(self, obj):
         return obj.created_by.get_full_name().strip() or obj.created_by.username
@@ -320,7 +390,7 @@ class AdminAccountSerializer(serializers.ModelSerializer):
 class AdminAdministratorSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ("id", "email", "username", "first_name", "last_name", "role", "is_staff", "is_superuser", "is_active", "date_joined", "last_login")
+        fields = ("id", "email", "username", "first_name", "last_name", "role", "is_staff", "is_superuser", "is_active", "date_joined", "last_login", "staff_notification_sections")
         read_only_fields = fields
 
 class AdminConversationMessageSerializer(serializers.ModelSerializer):

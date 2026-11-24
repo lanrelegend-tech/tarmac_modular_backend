@@ -14,6 +14,7 @@ from apps.administration.models import PlatformSettings, AdminLog
 from apps.administration.permissions import IsAdminOrAbove, PlatformFeatureEnabled
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from config.throttles import ActionRateLimitMixin
 from .models import Category, Product, ProductImage, Favourite
 from .serializers import CategorySerializer, ProductSerializer, ProductOwnerListSerializer, ProductImageUploadSerializer, FavouriteSerializer
 from .permissions import VerifiedStudentOrReadOnly
@@ -30,7 +31,10 @@ class CategoryViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         if self.request.user and self.request.user.is_staff:
             return Category.objects.annotate(products_count=Count("products"))
-        return Category.objects.filter(is_active=True, is_allowed_for_sale=True).annotate(products_count=Count("products"))
+        # Product totals are an admin-only display field. Computing a GROUP BY
+        # across all listings for every student's category menu adds work to
+        # this very common browse request without changing the student UI.
+        return Category.objects.filter(is_active=True, is_allowed_for_sale=True)
 
     def perform_create(self, serializer):
         category = serializer.save()
@@ -52,7 +56,13 @@ class ProductPagination(PageNumberPagination):
     page_size_query_param = "page_size"
     max_page_size = 50
 
-class ProductViewSet(viewsets.ModelViewSet):
+class ProductViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "product_listing_create",
+        "update": "product_listing_update",
+        "partial_update": "product_listing_update",
+        "mark_sold": "product_listing_update",
+    }
     platform_feature = "marketplace_enabled"
     pagination_class = ProductPagination
     serializer_class=ProductSerializer; permission_classes=[VerifiedStudentOrReadOnly, PlatformFeatureEnabled]; filterset_fields=["category","condition","status"]; search_fields=["title","description","location","area"]; ordering_fields=["price","created_at"]
@@ -148,7 +158,10 @@ class ProductViewSet(viewsets.ModelViewSet):
                 values.update(is_featured=True, featured_until=timezone.now() + timedelta(days=platform.sponsored_product_duration_days))
         if visibility == Product.Visibility.DRAFT:
             values["sponsor_requested"] = False
-        serializer.save(**values)
+        product = serializer.save(**values)
+        if product.status == Product.Status.PENDING_REVIEW:
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("marketplace", "Marketplace listing needs review", f'"{product.title}" was submitted and is waiting for approval.', {"kind": "product_review", "product_id": product.pk}, f"product-review:{product.pk}")
     def perform_update(self, serializer):
         if serializer.instance.seller_id != self.request.user.id:
             raise PermissionDenied("You can only edit your own listing.")
@@ -201,7 +214,12 @@ class ProductViewSet(viewsets.ModelViewSet):
         product.save(update_fields=("status", "updated_at"))
         return Response(self.get_serializer(product).data)
 
-class ProductImageViewSet(viewsets.ModelViewSet):
+class ProductImageViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "product_image_upload",
+        "update": "product_image_upload",
+        "partial_update": "product_image_upload",
+    }
     platform_feature = "marketplace_enabled"
     serializer_class=ProductImageUploadSerializer
     permission_classes=[VerifiedStudentOrReadOnly, PlatformFeatureEnabled]
@@ -242,7 +260,8 @@ class ProductImageViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You can only delete images from your own listing.")
         instance.delete()
 
-class FavouriteViewSet(viewsets.ModelViewSet):
+class FavouriteViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {"create": "favourite_write", "destroy": "favourite_write"}
     platform_feature = "marketplace_enabled"
     serializer_class=FavouriteSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     def get_queryset(self):

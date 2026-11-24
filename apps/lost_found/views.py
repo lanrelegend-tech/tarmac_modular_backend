@@ -18,7 +18,15 @@ from apps.administration.models import AdminLog
 from config.storage import optimized_image_response
 from apps.messaging.models import Conversation, BlockedUser
 from apps.messaging.serializers import ConversationSerializer
-class LostFoundReportViewSet(viewsets.ModelViewSet):
+from config.throttles import ActionRateLimitMixin
+class LostFoundReportViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "lost_found_create",
+        "update": "lost_found_update",
+        "partial_update": "lost_found_update",
+        "close": "lost_found_update",
+        "returned": "lost_found_update",
+    }
     platform_feature = "lost_found_enabled"
     serializer_class=LostFoundReportSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     search_fields = ["title", "description", "location", "colour", "identifying_details"]
@@ -35,7 +43,9 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
         campus = self.request.query_params.get("campus")
         return queryset.filter(campus__iexact=campus.strip()[:120]) if campus else queryset
     def perform_create(self,serializer):
-        serializer.save(reporter=self.request.user, status=LostFoundReport.Status.PENDING_REVIEW, is_active=False)
+        report = serializer.save(reporter=self.request.user, status=LostFoundReport.Status.PENDING_REVIEW, is_active=False)
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section("lost_found", "Lost & Found report needs review", f'"{report.title}" was submitted and is waiting for approval.', {"kind": "lost_found_review", "report_id": report.pk}, f"lost-found-review:{report.pk}")
     def perform_update(self,serializer):
         if serializer.instance.reporter_id!=self.request.user.id: raise PermissionDenied("You can only update your own report.")
         report = serializer.save()
@@ -98,7 +108,8 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
                                 {"kind":"lost_found_returned", "report_id":report.pk}, f"lost-found-returned:{report.pk}:{other.pk}")
                     notified.add(other.pk)
         return Response({"status": report.status})
-class ItemMatchViewSet(viewsets.ReadOnlyModelViewSet):
+class ItemMatchViewSet(ActionRateLimitMixin, viewsets.ReadOnlyModelViewSet):
+    action_throttle_scopes = {"message": "lost_found_contact", "review": "lost_found_contact"}
     platform_feature = "lost_found_enabled"
     serializer_class=ItemMatchSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     def get_queryset(self): return (ItemMatch.objects.filter(lost_report__reporter=self.request.user)|ItemMatch.objects.filter(found_report__reporter=self.request.user)).filter(lost_report__is_active=True, found_report__is_active=True, is_dismissed=False)
@@ -146,7 +157,8 @@ class ItemMatchViewSet(viewsets.ReadOnlyModelViewSet):
                             {"kind":"lost_found_match_response", "match_id":match.pk}, f"lost-found-match-response:{match.pk}:{other.pk}")
         return Response({"match_id": match.pk, "decision": review.decision}, status=status.HTTP_200_OK)
 
-class ItemClaimViewSet(viewsets.ModelViewSet):
+class ItemClaimViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {"create": "lost_found_claim"}
     serializer_class = ItemClaimSerializer
     permission_classes = [IsVerifiedStudent, PlatformFeatureEnabled]
     platform_feature = "lost_found_enabled"
@@ -158,6 +170,8 @@ class ItemClaimViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You cannot claim your own found-item report.")
         claim = serializer.save(claimant=self.request.user, evidence_name=serializer.validated_data.get("evidence").name if serializer.validated_data.get("evidence") else "")
         notify_user(report.reporter, "A student submitted an item claim", f'A student has submitted a claim for "{report.title}". School staff will review it.', {"kind":"item_claim", "claim_id":claim.pk}, f"item-claim:{claim.pk}:finder")
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section("lost_found", "Lost & Found claim needs review", f'A student submitted a claim for "{report.title}".', {"kind": "item_claim_review", "claim_id": claim.pk}, f"item-claim-review:{claim.pk}")
     @action(detail=True, methods=["get"], url_path="evidence")
     def evidence_file(self, request, pk=None):
         claim = self.get_object()

@@ -131,6 +131,8 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         if not campaign.payment_required_snapshot:
             campaign.status = AdCampaign.Status.PENDING_REVIEW
             campaign.save(update_fields=("status", "updated_at"))
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("ads", "Advertisement needs review", f'"{campaign.title}" is waiting for approval.', {"kind": "ad_review", "campaign_id": campaign.pk}, f"ad-review:{campaign.pk}")
             placements = list(campaign.ad_placements.order_by("pk")) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
             for slot in placements:
                 AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": campaign.starts_at, "ends_at": campaign.ends_at, "expires_at": campaign.ends_at, "is_confirmed": True})
@@ -248,6 +250,8 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         if not ad.payment_required_snapshot:
             ad.status = AdCampaign.Status.PENDING_REVIEW
             ad.save(update_fields=("status", "updated_at"))
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("ads", "Advertisement needs review", f'"{ad.title}" is waiting for approval.', {"kind": "ad_review", "campaign_id": ad.pk}, f"ad-review:{ad.pk}")
             placements = list(ad.ad_placements.order_by("pk")) or list(AdPlacement.objects.filter(pk=ad.ad_placement_id))
             for slot in placements:
                 AdSlotHold.objects.update_or_create(campaign=ad, placement=slot, defaults={"starts_at": ad.starts_at, "ends_at": ad.ends_at, "expires_at": ad.ends_at, "is_confirmed": True})

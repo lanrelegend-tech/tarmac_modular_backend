@@ -67,7 +67,18 @@ class ReportEvidence(models.Model):
 
 class Announcement(models.Model):
     class Audience(models.TextChoices): ALL_VERIFIED="all_verified", "All verified students"; DEPARTMENT="department", "Department"
-    title=models.CharField(max_length=160); body=models.TextField(); image=models.ImageField(upload_to="announcements/", blank=True, null=True); created_by=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT); is_published=models.BooleanField(default=False); is_archived=models.BooleanField(default=False, db_index=True); archived_at=models.DateTimeField(null=True,blank=True); expires_at=models.DateTimeField(null=True,blank=True,db_index=True); pinned=models.BooleanField(default=False); audience=models.CharField(max_length=20,choices=Audience.choices,default=Audience.ALL_VERIFIED); department=models.CharField(max_length=120,blank=True); published_at=models.DateTimeField(null=True,blank=True); delivery_cursor=models.PositiveBigIntegerField(default=0); delivery_completed=models.BooleanField(default=False); recipient_count=models.PositiveBigIntegerField(default=0); created_at=models.DateTimeField(auto_now_add=True)
+    class Category(models.TextChoices): EDUCATION="education", "Education"; EMERGENCY="emergency", "Emergency"; ACADEMIC="academic", "Academic"; EXAMINATIONS="examinations", "Examinations"; EVENTS="events", "Events"; SECURITY="security", "Safety & security"; MARKETPLACE="marketplace", "Marketplace"; LOST_FOUND="lost_found", "Lost & found"; JOBS="jobs", "Jobs & gigs"; ACCOMMODATION="accommodation", "Accommodation"; GENERAL="general", "General"
+    title=models.CharField(max_length=160); body=models.TextField(); poster_name=models.CharField(max_length=120,default="KWASU"); category=models.CharField(max_length=24,choices=Category.choices,default=Category.GENERAL,db_index=True); image=models.ImageField(upload_to="announcements/", blank=True, null=True); created_by=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT); is_published=models.BooleanField(default=False); is_archived=models.BooleanField(default=False, db_index=True); archived_at=models.DateTimeField(null=True,blank=True); expires_at=models.DateTimeField(null=True,blank=True,db_index=True); pinned=models.BooleanField(default=False); audience=models.CharField(max_length=20,choices=Audience.choices,default=Audience.ALL_VERIFIED); department=models.CharField(max_length=120,blank=True); published_at=models.DateTimeField(null=True,blank=True); delivery_cursor=models.PositiveBigIntegerField(default=0); delivery_completed=models.BooleanField(default=False); recipient_count=models.PositiveBigIntegerField(default=0); created_at=models.DateTimeField(auto_now_add=True)
+
+
+class AnnouncementImage(models.Model):
+    announcement = models.ForeignKey(Announcement, on_delete=models.CASCADE, related_name="gallery_images")
+    image = models.ImageField(upload_to="announcements/gallery/")
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("sort_order", "pk")
 
 
 class AnnouncementPublisher(models.Model):

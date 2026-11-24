@@ -4,10 +4,12 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from django.middleware.csrf import get_token
+import hashlib
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.throttling import AnonRateThrottle
 from apps.payments.webhooks import paystack_webhook
 from apps.accounts.authentication import (
     SchoolJWTAuthentication,
@@ -16,6 +18,7 @@ from apps.accounts.authentication import (
 )
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from apps.administration.views import system_status, system_logo, PublicEmergencyContactListView
+from config.health import live as liveness_probe, ready as readiness_probe
 
 
 class TarmacAdminSite(AdminSite):
@@ -64,9 +67,42 @@ class CsrfTokenView(APIView):
         return response
 
 
+class LoginThrottle(AnonRateThrottle):
+    scope = "auth_login"
+
+    def get_cache_key(self, request, view):
+        identity = self.get_ident(request)
+        email = str(request.data.get("email", "")).strip().casefold()
+        digest = hashlib.sha256(f"{identity}:{email}".encode("utf-8")).hexdigest()
+        return self.cache_format % {"scope": self.scope, "ident": digest}
+
+
+class TokenRefreshThrottle(AnonRateThrottle):
+    scope = "auth_refresh"
+
+    def get_cache_key(self, request, view):
+        token = request.COOKIES.get(settings.AUTH_REFRESH_COOKIE, "")
+        if not token:
+            return super().get_cache_key(request, view)
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return self.cache_format % {"scope": self.scope, "ident": digest}
+
+
+class LogoutThrottle(AnonRateThrottle):
+    scope = "auth_logout"
+
+    def get_cache_key(self, request, view):
+        token = request.COOKIES.get(settings.AUTH_REFRESH_COOKIE, "")
+        if not token:
+            return super().get_cache_key(request, view)
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return self.cache_format % {"scope": self.scope, "ident": digest}
+
+
 class SchoolTokenObtainPairView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [AnonRateThrottle, LoginThrottle]
 
     def post(self, request):
         SchoolJWTAuthentication.enforce_csrf(request)
@@ -80,6 +116,7 @@ class SchoolTokenObtainPairView(APIView):
 class SchoolTokenRefreshView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [TokenRefreshThrottle]
 
     def post(self, request):
         SchoolJWTAuthentication.enforce_csrf(request)
@@ -97,6 +134,7 @@ class SchoolTokenRefreshView(APIView):
 class SchoolTokenLogoutView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [LogoutThrottle]
 
     def post(self, request):
         SchoolJWTAuthentication.enforce_csrf(request)
@@ -111,6 +149,8 @@ class SchoolTokenLogoutView(APIView):
         return response
 
 urlpatterns = [
+    path("health/live/", liveness_probe, name="health-live"),
+    path("health/ready/", readiness_probe, name="health-ready"),
  path("api/system/status/", system_status, name="system-status"),
  path("api/system/logo/", system_logo, name="system-logo"),
  path("api/emergency-contacts/", PublicEmergencyContactListView.as_view(), name="public-emergency-contacts"),

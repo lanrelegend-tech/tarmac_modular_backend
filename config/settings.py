@@ -6,6 +6,19 @@ from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
+
+# Optional production error and performance monitoring. A DSN is configured
+# in the hosting dashboard; local development remains independent of Sentry.
+SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
+if SENTRY_DSN:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        send_default_pii=False,
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.02")),
+        environment=os.getenv("SENTRY_ENVIRONMENT", "production" if not os.getenv("DEBUG", "False").lower() == "true" else "development"),
+    )
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise ImproperlyConfigured("Set SECRET_KEY in the environment or .env file.")
@@ -137,7 +150,52 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.AnonRateThrottle", "rest_framework.throttling.UserRateThrottle"],
     # Global limits must leave room for normal page polling across multiple
     # tabs/devices. Sensitive write endpoints keep their own scoped limits.
-    "DEFAULT_THROTTLE_RATES": {"anon": os.getenv("ANON_THROTTLE_RATE", "300/hour"), "user": os.getenv("USER_THROTTLE_RATE", "10000/day"), "payment_initialization": "10/hour", "external_ad_submission": "5/hour", "external_ad_payment": "10/hour", "external_ad_manage": "30/hour", "external_ad_impression": "120/hour", "account_action": "10/hour", "username_availability": "60/hour", "presence": "40/hour", "external_job_submission": "5/hour", "external_job_manage": "30/hour"},
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": os.getenv("ANON_THROTTLE_RATE", "300/hour"),
+        "user": os.getenv("USER_THROTTLE_RATE", "10000/day"),
+        "payment_initialization": "10/hour",
+        "external_ad_submission": "5/hour",
+        "external_ad_payment": "10/hour",
+        "external_ad_manage": "30/hour",
+        "external_ad_impression": "120/hour",
+        "account_action": "10/hour",
+        "username_availability": "60/hour",
+        "presence": "40/hour",
+        "student_verification_submit": "5/day",
+        "profile_change_request": "5/day",
+        "profile_change_reply": "30/hour",
+        "external_job_submission": "5/hour",
+        "external_job_manage": "30/hour",
+        "auth_login": "10/hour",
+        "registration": "5/hour",
+        "auth_refresh": "120/hour",
+        "auth_logout": "30/hour",
+        "product_listing_create": "8/hour",
+        "product_listing_update": "30/hour",
+        "product_image_upload": "30/hour",
+        "favourite_write": "120/hour",
+        "lost_found_create": "8/hour",
+        "lost_found_update": "30/hour",
+        "lost_found_claim": "5/hour",
+        "lost_found_contact": "30/hour",
+        "message_create": "120/hour",
+        "conversation_start": "30/hour",
+        "block_write": "20/hour",
+        "job_listing_create": "8/hour",
+        "job_listing_update": "30/hour",
+        "job_engagement_write": "30/hour",
+        "job_report_create": "5/hour",
+        "accommodation_create": "6/hour",
+        "accommodation_update": "30/hour",
+        "hostel_agent_request": "3/day",
+        "review_create": "5/hour",
+        "review_report_create": "5/hour",
+        "support_ticket_create": "5/hour",
+        "support_reply": "60/hour",
+        "push_subscription_write": "30/hour",
+        "announcement_write": "30/hour",
+        "user_report_create": "5/hour",
+    },
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": int(os.getenv("API_PAGE_SIZE", "25")),
 }

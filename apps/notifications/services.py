@@ -11,9 +11,11 @@ from .email import send_tarmac_email
 
 logger = logging.getLogger(__name__)
 RETRY_MINUTES = (1, 5, 15, 60, 360)
+MAX_DELIVERY_ATTEMPTS = len(RETRY_MINUTES) + 1
 
 
 def queue_notification(user, channel, subject, body, data, dedupe_key):
+    dedupe_key = str(dedupe_key)[:180] if dedupe_key else None
     notification, created = Notification.objects.get_or_create(
         dedupe_key=dedupe_key,
         defaults={
@@ -28,6 +30,22 @@ def queue_notification(user, channel, subject, body, data, dedupe_key):
     # Provider calls are drained by retry_notifications, keeping user-facing
     # API requests independent from SMTP/WhatsApp network latency.
     return notification
+
+
+def queue_push_notification(user, subject, body, data, event_key):
+    """Queue push work only for accounts with an enrolled device."""
+    from .models import PushSubscription
+
+    if not PushSubscription.objects.filter(user_id=user.pk).exists():
+        return None
+    return queue_notification(
+        user,
+        Notification.Channel.PUSH,
+        subject,
+        body,
+        data,
+        f"{event_key}:push",
+    )
 
 
 def notify_possible_match(match):
@@ -95,7 +113,7 @@ def send_official_match_message(match, user, report_title, confirmed=False):
 
 def notify_user(user, subject, body, data, event_key, *, dispatch_email=False, force_email=False):
     queue_notification(user, Notification.Channel.IN_APP, subject, body, data, f"{event_key}:in_app")
-    transaction.on_commit(lambda: send_web_push(user.pk, subject, body, data, event_key))
+    queue_push_notification(user, subject, body, data, event_key)
     from apps.administration.models import PlatformSettings
     platform = PlatformSettings.get_solo()
     kind = (data or {}).get("kind", "")
@@ -105,8 +123,8 @@ def notify_user(user, subject, body, data, event_key, *, dispatch_email=False, f
     if user.email and (force_email or (platform.email_notifications_enabled and category_settings.get("email", True) and user.notification_email_enabled)):
         email_data = {**(data or {}), "_force_email_delivery": True} if force_email else data
         email_notification = queue_notification(user, Notification.Channel.EMAIL, subject, body, email_data, f"{event_key}:email")
-    if dispatch_email and email_notification:
-        transaction.on_commit(lambda notification_id=email_notification.pk: dispatch_notification(notification_id))
+    # Email, WhatsApp, and push are all drained by retry_notifications. Keep
+    # provider network calls out of the request/commit path.
     if category_settings.get("whatsapp", False) and user.notification_whatsapp_enabled and user.whatsapp_consent_at and user.whatsapp_number:
         template_key = whatsapp_template_key((data or {}).get("whatsapp_template_kind") or kind)
         if template_key and os.getenv(template_key):
@@ -254,12 +272,16 @@ def _send_whatsapp(notification):
 
 
 def dispatch_notification(notification_id):
+    notification = None
+    now = timezone.now()
     with transaction.atomic():
         try:
             notification = Notification.objects.select_for_update().select_related("user").get(pk=notification_id)
         except Notification.DoesNotExist:
             return
-        if notification.is_sent or notification.attempts >= len(RETRY_MINUTES):
+        if notification.is_sent or notification.attempts >= MAX_DELIVERY_ATTEMPTS:
+            return
+        if notification.next_attempt_at and notification.next_attempt_at > now:
             return
         if notification.channel != Notification.Channel.IN_APP:
             from apps.administration.models import PlatformSettings
@@ -284,29 +306,57 @@ def dispatch_notification(notification_id):
                 notification.last_error = "Skipped because WhatsApp delivery is disabled by the user or administrator."
                 notification.save(update_fields=("is_sent", "last_error"))
                 return
+        # Claim the row before contacting a provider. The lease prevents two
+        # overlapping scheduled workers from sending the same notification,
+        # and releasing this transaction avoids holding a DB lock over HTTP.
         notification.attempts += 1
-        try:
-            if notification.channel == Notification.Channel.EMAIL:
-                sent = _send_email(notification)
-                if sent != 1:
-                    raise RuntimeError("Email provider did not accept the message.")
-            elif notification.channel == Notification.Channel.WHATSAPP:
-                _send_whatsapp(notification)
+        attempt = notification.attempts
+        notification.next_attempt_at = now + timedelta(minutes=5)
+        notification.save(update_fields=("attempts", "next_attempt_at"))
+
+    try:
+        if notification.channel == Notification.Channel.EMAIL:
+            sent = _send_email(notification)
+            if sent != 1:
+                raise RuntimeError("Email provider did not accept the message.")
+        elif notification.channel == Notification.Channel.WHATSAPP:
+            _send_whatsapp(notification)
+        elif notification.channel == Notification.Channel.PUSH:
+            send_web_push(
+                notification.user_id,
+                notification.subject,
+                notification.body,
+                notification.data,
+                notification.dedupe_key or str(notification.pk),
+            )
+        with transaction.atomic():
             notification.is_sent = True
             notification.last_error = ""
             notification.next_attempt_at = None
-        except Exception as exc:
+            notification.save(update_fields=("is_sent", "last_error", "next_attempt_at"))
+    except Exception as exc:
+        with transaction.atomic():
             notification.last_error = str(exc)[:2000]
-            if notification.attempts < len(RETRY_MINUTES):
-                notification.next_attempt_at = timezone.now() + timedelta(minutes=RETRY_MINUTES[notification.attempts - 1])
+            if attempt <= len(RETRY_MINUTES):
+                notification.next_attempt_at = timezone.now() + timedelta(minutes=RETRY_MINUTES[attempt - 1])
+            else:
+                notification.next_attempt_at = None
+            notification.save(update_fields=("last_error", "next_attempt_at"))
             logger.exception("Notification delivery failed for notification %s", notification.pk)
-        notification.save(update_fields=("attempts", "is_sent", "last_error", "next_attempt_at"))
 
 
 def send_web_push(user_id, subject, body, data=None, event_key=""):
-    """Deliver branded browser push to subscriptions that the student opted into."""
+    """Deliver branded browser push to the signed-in account's subscriptions."""
     from django.conf import settings
     from .models import PushSubscription
+    from apps.accounts.models import User
+    recipient = User.objects.filter(pk=user_id).only("id", "is_staff", "is_superuser", "staff_notification_sections").first()
+    if not recipient:
+        return
+    if recipient.is_staff and not recipient.is_superuser:
+        section = (data or {}).get("staff_section")
+        if not section or section not in (recipient.staff_notification_sections or []):
+            return
     if not (getattr(settings, "WEB_PUSH_PUBLIC_KEY", "") and getattr(settings, "WEB_PUSH_PRIVATE_KEY", "")):
         return
     try:

@@ -13,14 +13,17 @@ from apps.accounts.permissions import IsVerifiedStudent
 from apps.accounts.permissions import is_student_feature_eligible
 from .models import ReviewReport, SellerReview
 from .serializers import ReviewReportSerializer, SellerReviewSerializer
+from config.throttles import ActionRateLimitMixin
 
 
 class SellerReviewViewSet(
+    ActionRateLimitMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
     viewsets.GenericViewSet,
 ):
+    action_throttle_scopes = {"create": "review_create"}
     serializer_class = SellerReviewSerializer
     permission_classes = [IsVerifiedStudent]
     http_method_names = ["get", "post", "head", "options"]
@@ -105,10 +108,14 @@ class SellerReviewViewSet(
         conversation = serializer.validated_data["conversation"]
         if SellerReview.objects.filter(conversation=conversation, reviewer=self.request.user, category=SellerReview.Category.MARKETPLACE).exists():
             raise ValidationError({"conversation": "You have already left feedback for this conversation."})
-        serializer.save(status=SellerReview.Status.PENDING if PlatformSettings.get_solo().review_moderation_enabled else SellerReview.Status.APPROVED)
+        review = serializer.save(status=SellerReview.Status.PENDING if PlatformSettings.get_solo().review_moderation_enabled else SellerReview.Status.APPROVED)
+        if review.status == SellerReview.Status.PENDING:
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("reviews", "Review needs moderation", f"A new review was submitted for moderation (review #{review.pk}).", {"kind": "review_moderation", "review_id": review.pk}, f"review-moderation:{review.pk}")
 
 
-class ReviewReportViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet):
+class ReviewReportViewSet(ActionRateLimitMixin, mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet):
+    action_throttle_scopes = {"create": "review_report_create"}
     serializer_class = ReviewReportSerializer
     permission_classes = [IsVerifiedStudent]
     http_method_names = ["get", "post", "head", "options"]
@@ -118,7 +125,5 @@ class ReviewReportViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, viewse
 
     def perform_create(self, serializer):
         report = serializer.save(reporter=self.request.user)
-        from apps.accounts.models import User
-        from apps.notifications.services import notify_user
-        for admin in User.objects.filter(is_staff=True, is_active=True, is_suspended=False).iterator():
-            notify_user(admin, "Review reported", f"A student reported review #{report.review_id} for {report.reason}.", {"kind": "review_report", "report_id": report.pk}, f"review-report:{report.pk}:admin:{admin.pk}")
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section("reviews", "Review reported", f"A student reported review #{report.review_id} for {report.reason}.", {"kind": "review_report", "report_id": report.pk}, f"review-report:{report.pk}")

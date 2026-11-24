@@ -37,6 +37,7 @@ class User(AbstractUser):
     campus = models.CharField(max_length=120, blank=True); area = models.CharField(max_length=120, blank=True); bio = models.CharField(max_length=200, blank=True)
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.STUDENT)
+    staff_notification_sections = models.JSONField(default=list, blank=True)
     is_student_verified = models.BooleanField(default=False); is_suspended = models.BooleanField(default=False)
     is_hostel_agent = models.BooleanField(default=False, db_index=True)
     email_verified = models.BooleanField(default=False)

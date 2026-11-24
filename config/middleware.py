@@ -10,6 +10,7 @@ class MaintenanceModeMiddleware:
     def __call__(self, request):
         if (request.path.startswith("/admin/") or request.path.startswith("/api/admin-tools/")
                 or request.path.startswith("/api/auth/") or request.path.startswith("/api/system/")
+                or request.path.startswith("/health/")
                 or request.path == "/api/payments/webhook/"):
             return self.get_response(request)
         platform = PlatformSettings.get_solo()

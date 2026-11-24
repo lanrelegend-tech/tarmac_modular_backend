@@ -24,7 +24,7 @@ from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_elig
 from config.storage import optimized_image_response
 from apps.administration.models import PlatformSettings
 from apps.administration.permissions import IsAdminOrAbove, PlatformFeatureEnabled
-from .models import AdAdvertiser, AdCampaign, AdImpression, AdPlacement, AdSlotHold, AdWaitlistEntry
+from .models import AdAdvertiser, AdBookmark, AdCampaign, AdImpression, AdPlacement, AdSlotHold, AdWaitlistEntry
 from .serializers import AdCampaignSerializer, AdPlacementSerializer, AdWaitlistEntrySerializer
 from .services import get_slot_availability, local_date_window
 from .throttles import PublicAdImpressionThrottle, PublicAdManageThrottle, PublicAdSubmissionThrottle
@@ -272,12 +272,17 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         return [IsVerifiedStudent(), PlatformFeatureEnabled()]
 
     def get_queryset(self):
-        if self.request.user.is_staff:
+        saved_only = self.request.query_params.get("saved") == "true"
+        if self.request.user.is_staff and not saved_only:
             return AdCampaign.objects.select_related("advertiser", "business_advertiser", "ad_placement", "package").prefetch_related("payments", "ad_placements").all()
         now = timezone.now()
         active = AdCampaign.objects.filter(status=AdCampaign.Status.ACTIVE).prefetch_related("payments", "ad_placements").filter(
             models_q_start(now), models_q_end(now)
         )
+        if saved_only:
+            if not self.request.user.is_authenticated:
+                return AdCampaign.objects.none()
+            active = active.filter(bookmarks__user=self.request.user).distinct()
         surface = self.request.query_params.get("surface")
         platform = PlatformSettings.get_solo()
         surface_flags = {
@@ -313,6 +318,8 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             else:
                 page_text = Cast("pages", output_field=CharField())
                 active = active.filter(Q(IContains(page_text, Value(f'"{page_value}"'))))
+            return active
+        if saved_only:
             return active
         if self.request.user.is_authenticated:
             return active | AdCampaign.objects.filter(advertiser=self.request.user).prefetch_related("payments", "ad_placements")
@@ -423,6 +430,9 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             advertising_policy_accepted=True,
             advertising_policy_accepted_at=timezone.now(),
         )
+        if campaign.status == AdCampaign.Status.PENDING_REVIEW:
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("ads", "Advertisement needs review", f'"{campaign.title}" was submitted and is waiting for approval.', {"kind": "ad_review", "campaign_id": campaign.pk}, f"ad-review:{campaign.pk}")
         for slot in placements:
             AdSlotHold.objects.update_or_create(campaign=campaign, placement=slot, defaults={"starts_at": starts_at, "ends_at": ends_at, "expires_at": timezone.now() + timedelta(minutes=30) if needs_payment else ends_at, "is_confirmed": not needs_payment})
         if waitlist_entry:
@@ -587,6 +597,9 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             plan_price_kobo=package.price_kobo,
             payment_required_snapshot=needs_payment,
         )
+        if campaign.status == AdCampaign.Status.PENDING_REVIEW:
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("ads", "Advertisement needs review", f'"{campaign.title}" was submitted and is waiting for approval.', {"kind": "ad_review", "campaign_id": campaign.pk}, f"ad-review:{campaign.pk}")
         campaign_placements = list(campaign.ad_placements.all()) or _default_placements_for_pages(campaign.pages)
         if campaign_placements:
             campaign.ad_placements.set(campaign_placements)
@@ -817,6 +830,21 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         if created:
             AdCampaign.objects.filter(pk=campaign.pk, status=AdCampaign.Status.ACTIVE).update(impression_count=F("impression_count") + 1)
         return Response({"tracked": created})
+
+    @action(detail=False, methods=("get",), url_path="saved")
+    def saved(self, request):
+        ids = AdBookmark.objects.filter(user=request.user, campaign__status=AdCampaign.Status.ACTIVE).values_list("campaign_id", flat=True)
+        return Response({"ids": list(ids)})
+
+    @action(detail=True, methods=("post",), url_path="toggle-saved")
+    def toggle_saved(self, request, pk=None):
+        campaign = self.get_object()
+        if campaign.status != AdCampaign.Status.ACTIVE:
+            raise PermissionDenied("Only active advertisements can be saved.")
+        bookmark, created = AdBookmark.objects.get_or_create(user=request.user, campaign=campaign)
+        if not created:
+            bookmark.delete()
+        return Response({"saved": created, "campaign_id": campaign.pk})
 
 
 def models_q_start(now):

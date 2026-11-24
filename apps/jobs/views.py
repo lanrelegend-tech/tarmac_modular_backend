@@ -17,6 +17,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from uuid import UUID
+from config.throttles import ActionRateLimitMixin
 
 from apps.accounts.models import User
 from apps.accounts.permissions import IsVerifiedStudent, is_student_feature_eligible
@@ -48,8 +49,9 @@ def _send_external_email(*, subject, body, recipient, url="", action_label="Open
 
 
 def _notify_admins(subject, body, data, dedupe):
-    for administrator in User.objects.filter(is_staff=True, is_active=True, is_suspended=False).iterator():
-        notify_user(administrator, subject, body, data, f"{dedupe}:admin:{administrator.pk}")
+    from apps.notifications.staff import notify_staff_section
+    section = (data or {}).get("staff_section", "jobs")
+    notify_staff_section(section, subject, body, data, dedupe)
 
 
 class JobCategoryViewSet(viewsets.ModelViewSet):
@@ -76,7 +78,17 @@ class JobCategoryViewSet(viewsets.ModelViewSet):
             instance.delete()
 
 
-class JobListingViewSet(viewsets.ModelViewSet):
+class JobListingViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "job_listing_create",
+        "update": "job_listing_update",
+        "partial_update": "job_listing_update",
+        "pause": "job_listing_update",
+        "resume": "job_listing_update",
+        "filled": "job_listing_update",
+        "remove": "job_listing_update",
+        "message_poster": "conversation_start",
+    }
     serializer_class = JobListingSerializer
     permission_classes = (IsVerifiedStudent, PlatformFeatureEnabled)
     platform_feature = "jobs_enabled"
@@ -103,9 +115,6 @@ class JobListingViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         today = timezone.localdate()
-        JobListing.objects.filter(status=JobListing.Status.ACTIVE, deadline__lt=today).update(
-            status=JobListing.Status.EXPIRED, closed_at=timezone.now()
-        )
         qs = JobListing.objects.select_related("owner", "owner__course", "category", "anonymous_identity")
         if self.request.user.is_staff:
             return qs
@@ -163,7 +172,10 @@ class JobListingViewSet(viewsets.ModelViewSet):
         platform = PlatformSettings.get_solo()
         status_value = JobListing.Status.PENDING_REVIEW if platform.job_listing_approval_required else JobListing.Status.ACTIVE
         alias = serializer.validated_data.pop("_anonymous_identity", None)
-        serializer.save(source=JobListing.Source.STUDENT, owner=self.request.user, anonymous_identity=alias, status=status_value)
+        listing = serializer.save(source=JobListing.Source.STUDENT, owner=self.request.user, anonymous_identity=alias, status=status_value)
+        if listing.status == JobListing.Status.PENDING_REVIEW:
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("jobs", "Jobs & Gigs post needs review", f'"{listing.title}" was submitted and is waiting for approval.', {"kind": "job_review", "listing_id": listing.pk}, f"job-review:{listing.pk}")
 
     def perform_update(self, serializer):
         listing = serializer.instance
@@ -251,7 +263,14 @@ class JobListingViewSet(viewsets.ModelViewSet):
         return Response(ConversationSerializer(conversation, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
-class JobEngagementViewSet(viewsets.ModelViewSet):
+class JobEngagementViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "job_engagement_write",
+        "accept": "job_engagement_write",
+        "request_completion": "job_engagement_write",
+        "confirm_completion": "job_engagement_write",
+        "cancel": "job_engagement_write",
+    }
     serializer_class = JobEngagementSerializer
     permission_classes = (IsVerifiedStudent, PlatformFeatureEnabled)
     platform_feature = "jobs_enabled"
@@ -333,7 +352,8 @@ class JobEngagementViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(engagement).data)
 
 
-class JobReportViewSet(viewsets.ModelViewSet):
+class JobReportViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {"create": "job_report_create"}
     serializer_class = JobReportSerializer
     permission_classes = (IsVerifiedStudent, PlatformFeatureEnabled)
     platform_feature = "jobs_enabled"
@@ -344,7 +364,7 @@ class JobReportViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         report = serializer.save(reporter=self.request.user)
-        _notify_admins("New Jobs & Gigs report", f"A student reported listing #{report.listing_id}.", {"kind": "job_report", "report_id": report.pk}, f"job-report:{report.pk}")
+        _notify_admins("New Jobs & Gigs report", f"A student reported listing #{report.listing_id}.", {"kind": "job_report", "report_id": report.pk, "staff_section": "jobs"}, f"job-report:{report.pk}")
 
 
 class ExternalJobSubmissionView(APIView):
@@ -401,7 +421,7 @@ class ExternalJobEmailConfirmView(APIView):
         listing.business_email_token_expires_at = None
         listing.status = JobListing.Status.PENDING_REVIEW
         listing.save(update_fields=("business_email_verified_at", "business_email_token_hash", "business_email_token_expires_at", "status", "updated_at"))
-        _notify_admins("External job awaiting review", f"{listing.business_name} submitted {listing.title}.", {"kind": "external_job_submission", "listing_id": listing.pk}, f"external-job:{listing.pk}")
+        _notify_admins("External job awaiting review", f"{listing.business_name} submitted {listing.title}.", {"kind": "external_job_submission", "listing_id": listing.pk, "staff_section": "jobs"}, f"external-job:{listing.pk}")
         _send_external_email(subject="Your Tarmac submission is under review", body=f"Your email is confirmed. The KWASU team will review {listing.title} before it is published.", recipient=listing.business_email)
         return Response({"detail": "Email confirmed. Your opportunity is waiting for admin review."})
 

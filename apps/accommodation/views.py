@@ -19,9 +19,17 @@ from apps.notifications.services import notify_user
 from apps.accounts.models import User
 from .models import AccommodationListing, HostelAgentRequest
 from .serializers import AccommodationListingSerializer, AdminAccommodationListingSerializer, HostelAgentRequestSerializer, AdminHostelAgentRequestSerializer
+from config.throttles import ActionRateLimitMixin
 
 
-class AccommodationListingViewSet(viewsets.ModelViewSet):
+class AccommodationListingViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "accommodation_create",
+        "update": "accommodation_update",
+        "partial_update": "accommodation_update",
+        "filled": "accommodation_update",
+        "message": "conversation_start",
+    }
     serializer_class = AccommodationListingSerializer
     permission_classes = (IsVerifiedStudent, PlatformFeatureEnabled)
     platform_feature = "accommodation_enabled"
@@ -73,7 +81,9 @@ class AccommodationListingViewSet(viewsets.ModelViewSet):
         pending_count = AccommodationListing.objects.filter(owner=self.request.user, status=AccommodationListing.Status.PENDING_REVIEW).count()
         if pending_count >= 3:
             raise ValidationError({"detail": "You already have 3 accommodation posts awaiting review. Wait for a decision before submitting another."})
-        serializer.save(owner=self.request.user, status=AccommodationListing.Status.PENDING_REVIEW)
+        listing = serializer.save(owner=self.request.user, status=AccommodationListing.Status.PENDING_REVIEW)
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section("accommodation", "Accommodation listing needs review", f'"{listing.title}" was submitted and is waiting for approval.', {"kind": "accommodation_review", "listing_id": listing.pk}, f"accommodation-review:{listing.pk}")
 
     def perform_update(self, serializer):
         if serializer.instance.owner_id != self.request.user.pk:
@@ -180,7 +190,8 @@ class AdminAccommodationListingViewSet(viewsets.ModelViewSet):
             notify_user(listing.owner, subject, body, {"kind": "accommodation_review", "listing_id": listing.pk, "status": listing.status, "notification_category": "accommodation", "link": "/accommodation"}, f"accommodation-review:{listing.pk}:{listing.status}:{listing.updated_at.timestamp()}", dispatch_email=True)
 
 
-class HostelAgentRequestViewSet(viewsets.ModelViewSet):
+class HostelAgentRequestViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {"create": "hostel_agent_request"}
     serializer_class = HostelAgentRequestSerializer
     permission_classes = (IsVerifiedStudent, PlatformFeatureEnabled)
     platform_feature = "accommodation_enabled"
@@ -199,8 +210,8 @@ class HostelAgentRequestViewSet(viewsets.ModelViewSet):
             raise ValidationError({"detail": "You already have a Hostel Agent request awaiting review."})
         request_record = serializer.save(user=user, status=HostelAgentRequest.Status.PENDING)
         AdminLog.objects.create(actor=user, action="hostel_agent_badge_requested", target_type="HostelAgentRequest", target_id=str(request_record.pk), metadata={"user_id": user.pk})
-        for administrator in User.objects.filter(is_staff=True, is_active=True, is_suspended=False):
-            notify_user(administrator, "Hostel Agent badge request", f"{user.get_full_name().strip() or user.username} requested permission to list accommodation.", {"kind": "accommodation_agent_request", "notification_category": "accommodation", "request_id": request_record.pk, "link": "/admin/accommodation"}, f"hostel-agent-request:{request_record.pk}:{administrator.pk}")
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section("accommodation", "Hostel Agent request needs review", f"{user.get_full_name().strip() or user.username} requested a Hostel Agent badge.", {"kind": "hostel_agent_request", "request_id": request_record.pk}, f"hostel-agent-request:{request_record.pk}")
 
 
 class AdminHostelAgentRequestViewSet(viewsets.ModelViewSet):

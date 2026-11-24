@@ -24,6 +24,7 @@ from .permissions import IsVerifiedStudent, is_student_feature_eligible
 from apps.administration.permissions import IsAdminOrAbove
 from .services import consume_account_action_token, issue_account_action_token
 from .utils import username_change_available_at
+from config.throttles import ActionRateLimitMixin
 
 logger = logging.getLogger(__name__)
 class AccountActionThrottle(AnonRateThrottle):
@@ -31,6 +32,15 @@ class AccountActionThrottle(AnonRateThrottle):
 
 class UsernameAvailabilityThrottle(AnonRateThrottle):
     scope = "username_availability"
+
+class RegistrationThrottle(AnonRateThrottle):
+    scope = "registration"
+
+    def get_cache_key(self, request, view):
+        identity = self.get_ident(request)
+        email = str(request.data.get("email", "")).strip().casefold()
+        digest = hashlib.sha256(f"{identity}:{email}".encode("utf-8")).hexdigest()
+        return self.cache_format % {"scope": self.scope, "ident": digest}
 
 class SuspensionAppealView(generics.GenericAPIView):
     permission_classes = [permissions.AllowAny]
@@ -59,9 +69,8 @@ class SuspensionAppealView(generics.GenericAPIView):
             action_token.used_at = timezone.now()
             action_token.save(update_fields=("used_at",))
         AdminLog.objects.create(actor=None, action="student_suspension_appeal_submitted", target_type="SupportTicket", target_id=str(ticket.pk), metadata={"user_id": action_token.user_id})
-        from apps.notifications.services import notify_user
-        for administrator in User.objects.filter(is_staff=True, is_active=True, is_suspended=False).iterator():
-            notify_user(administrator, "New account suspension appeal", action_token.user.username, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"suspension-appeal:{ticket.pk}:admin:{administrator.pk}")
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section("support", "New account suspension appeal", action_token.user.username, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"suspension-appeal:{ticket.pk}")
         return Response({"detail": "Your appeal was sent to Tarmac Support. You will receive an email when it has been reviewed."}, status=status.HTTP_201_CREATED)
 
 
@@ -181,7 +190,7 @@ class CourseProgramViewSet(viewsets.ModelViewSet):
 
 class RegisterView(generics.CreateAPIView):
     queryset=User.objects.all(); serializer_class=RegisterSerializer; permission_classes=[permissions.AllowAny]
-    throttle_classes = [AccountActionThrottle]
+    throttle_classes = [AnonRateThrottle, RegistrationThrottle]
     def create(self, request, *args, **kwargs):
         from apps.administration.models import PlatformSettings
         from rest_framework.exceptions import PermissionDenied
@@ -322,7 +331,7 @@ def me(request):
         serializer = ProfileUpdateSerializer(request.user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-    return Response(UserSerializer(request.user).data)
+    return Response(UserSerializer(request.user, context={"request": request}).data)
 
 
 @api_view(["POST"])
@@ -339,7 +348,11 @@ def presence_heartbeat(request):
     return Response({"last_seen_at": request.user.last_seen_at})
 
 
-class ProfileChangeRequestViewSet(viewsets.ModelViewSet):
+class ProfileChangeRequestViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "profile_change_request",
+        "reply": "profile_change_reply",
+    }
     serializer_class = StudentProfileChangeRequestSerializer
     permission_classes = [permissions.IsAuthenticated]
     http_method_names = ["get", "post", "head", "options"]
@@ -349,9 +362,8 @@ class ProfileChangeRequestViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         change_request = serializer.save()
-        from apps.notifications.services import notify_user
-        for administrator in User.objects.filter(is_staff=True, is_active=True, is_suspended=False):
-            notify_user(administrator, "Profile change request", f"{change_request.user.get_full_name() or change_request.user.username} requested a profile change.", {"kind": "profile_change_request", "request_id": change_request.pk}, f"profile-change:{change_request.pk}:admin:{administrator.pk}")
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section("profile_changes", "Profile change request", f"{change_request.user.get_full_name() or change_request.user.username} requested a profile change.", {"kind": "profile_change_request", "request_id": change_request.pk}, f"profile-change:{change_request.pk}")
 
     @action(detail=True, methods=["post"])
     def reply(self, request, pk=None):
@@ -364,16 +376,14 @@ class ProfileChangeRequestViewSet(viewsets.ModelViewSet):
         message = ProfileChangeMessage.objects.create(request=change_request, sender=request.user, body=body)
         change_request.status = ProfileChangeRequest.Status.PENDING
         change_request.save(update_fields=("status", "updated_at"))
-        from apps.notifications.services import notify_user
-        for administrator in User.objects.filter(is_staff=True, is_active=True, is_suspended=False):
-            notify_user(
-                administrator,
-                "Student replied to a profile change question",
-                f"{request.user.get_full_name().strip() or request.user.username} replied to profile change request #{change_request.pk}. Open the request in Tarmac to review the answer.",
-                {"kind": "profile_change_reply", "request_id": change_request.pk},
-                f"profile-change-reply:{message.pk}:admin:{administrator.pk}",
-                dispatch_email=True,
-            )
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section(
+            "profile_changes",
+            "Student replied to a profile change question",
+            f"{request.user.get_full_name().strip() or request.user.username} replied to profile change request #{change_request.pk}. Open the request in Tarmac to review the answer.",
+            {"kind": "profile_change_reply", "request_id": change_request.pk},
+            f"profile-change-reply:{message.pk}",
+        )
         return Response(self.get_serializer(change_request).data)
 
 
@@ -463,7 +473,13 @@ def resend_verification_email(request):
     if user and not user.email_verified and not user.is_suspended:
         issue_account_action_token(user, AccountActionToken.Purpose.EMAIL_VERIFY)
     return Response({"detail": "If that email belongs to an unverified Tarmac account, another verification link will be sent."})
-class VerificationViewSet(viewsets.ModelViewSet):
+class VerificationViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "student_verification_submit",
+        "update": "student_verification_submit",
+        "partial_update": "student_verification_submit",
+        "destroy": "student_verification_submit",
+    }
     serializer_class=StudentVerificationSerializer; permission_classes=[permissions.IsAuthenticated]
     def get_queryset(self): return StudentVerification.objects.filter(user=self.request.user).order_by("-created_at", "-pk")
     @transaction.atomic
@@ -473,10 +489,13 @@ class VerificationViewSet(viewsets.ModelViewSet):
             delete_verification_id_image(serializer.instance)
         profile_photo = serializer.validated_data.pop("profile_picture", None)
         serializer.validated_data.pop("profile_photo_consent", None)
-        serializer.save()
+        verification = serializer.save()
         if profile_photo:
             from .services import save_account_profile_photo
             save_account_profile_photo(self.request.user, profile_photo)
+        if verification.status == StudentVerification.Status.PENDING:
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("verification", "Student verification needs review", f"{self.request.user.get_full_name().strip() or self.request.user.username} submitted student verification.", {"kind": "student_verification_review", "verification_id": verification.pk}, f"student-verification:{verification.pk}:{verification.updated_at.timestamp()}")
     def perform_create(self, serializer):
         from apps.administration.models import PlatformSettings
         from django.utils import timezone
@@ -501,10 +520,13 @@ class VerificationViewSet(viewsets.ModelViewSet):
                 save_account_profile_photo(self.request.user, profile_photo)
             self.request.user.save(update_fields=user_fields)
         else:
-            serializer.save(user=self.request.user)
+            verification = serializer.save(user=self.request.user)
             if profile_photo:
                 from .services import save_account_profile_photo
                 save_account_profile_photo(self.request.user, profile_photo)
+            if verification.status == StudentVerification.Status.PENDING:
+                from apps.notifications.staff import notify_staff_section
+                notify_staff_section("verification", "Student verification needs review", f"{self.request.user.get_full_name().strip() or self.request.user.username} submitted student verification.", {"kind": "student_verification_review", "verification_id": verification.pk}, f"student-verification:{verification.pk}")
     def perform_destroy(self, instance):
         if instance.status != StudentVerification.Status.PENDING:
             from rest_framework.exceptions import PermissionDenied

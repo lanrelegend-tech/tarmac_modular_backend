@@ -9,7 +9,7 @@ class Category(models.Model):
     class Meta: ordering = ("name", "pk")
     def __str__(self): return self.name
 class Product(models.Model):
-    class Condition(models.TextChoices): LIKE_NEW="like_new","Like new"; VERY_GOOD="very_good","Very good"; GOOD="good","Good"; FAIR="fair","Fair"
+    class Condition(models.TextChoices): BRAND_NEW="brand_new","Brand new"; FAIRLY_USED="fairly_used","Fairly used"; USED="used","Used"; OLD="old","Old"
     class Status(models.TextChoices): PENDING_PAYMENT="pending_payment","Pending payment"; PENDING_REVIEW="pending_review","Pending school review"; ACTIVE="active","Active"; RESERVED="reserved","Reserved"; SOLD="sold","Sold"; EXPIRED="expired","Expired"; REMOVED="removed","Removed"
     public_id=models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
     seller=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="products"); category=models.ForeignKey(Category,on_delete=models.PROTECT,related_name="products")

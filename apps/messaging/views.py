@@ -16,7 +16,15 @@ from .models import Conversation,Message,MessageAttachment
 from .serializers import ConversationSerializer,MessageSerializer,BlockedUserSerializer
 from .models import BlockedUser
 from apps.notifications.services import notify_user
-class ConversationViewSet(viewsets.ModelViewSet):
+from config.throttles import ActionRateLimitMixin
+class ConversationViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "start_marketplace": "conversation_start",
+        "start_job": "conversation_start",
+        "block": "block_write",
+        "link_marketplace": "conversation_start",
+        "complete": "conversation_start",
+    }
     platform_feature = "messaging_enabled"
     serializer_class=ConversationSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     def get_queryset(self):
@@ -259,7 +267,13 @@ class ConversationViewSet(viewsets.ModelViewSet):
         conversation.updated_at = completion_event_at
         conversation.save(update_fields=("status", "completed_at", "updated_at"))
         return Response(self.get_serializer(conversation).data)
-class MessageViewSet(viewsets.ModelViewSet):
+class MessageViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "message_create",
+        "update": "message_create",
+        "partial_update": "message_create",
+        "destroy": "message_create",
+    }
     platform_feature = "messaging_enabled"
     serializer_class=MessageSerializer; permission_classes=[IsVerifiedStudent, PlatformFeatureEnabled]
     def get_queryset(self):
@@ -288,7 +302,8 @@ class MessageViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only the message sender can delete this message.")
         instance.delete()
 
-class BlockedUserViewSet(viewsets.ModelViewSet):
+class BlockedUserViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {"create": "block_write", "destroy": "block_write"}
     serializer_class = BlockedUserSerializer
     permission_classes = [IsVerifiedStudent]
     http_method_names = ["get", "post", "delete", "head", "options"]

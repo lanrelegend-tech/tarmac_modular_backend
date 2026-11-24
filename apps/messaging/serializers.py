@@ -34,10 +34,16 @@ class ConversationSerializer(serializers.ModelSerializer):
         data = []
         for user in obj.participants.all():
             snapshot = snapshots.get(user.pk)
-            if not snapshot:
-                name = "Tarmac Administration" if user.is_staff else (user.get_full_name().strip() or user.username)
-                snapshot = create_participant_snapshot(obj, user, name=name)
-            data.append({"is_me": bool(request and user.pk == request.user.pk), "name": "Tarmac Support" if user.is_staff else snapshot.display_name, "is_staff": user.is_staff, "identity_type": snapshot.identity_type, "public_identity_id": snapshot.public_identity_id, "student_status": snapshot.verification_badge, "last_seen_at": user.last_seen_at})
+            # Inbox reads must stay read-only. Legacy conversations without a
+            # snapshot get a safe account-based fallback instead of creating
+            # database rows while serializing a GET request.
+            display_name = snapshot.display_name if snapshot else (
+                "Tarmac Administration" if user.is_staff else (user.get_full_name().strip() or user.username)
+            )
+            identity_type = snapshot.identity_type if snapshot else "normal"
+            public_identity_id = snapshot.public_identity_id if snapshot else str(user.public_id)
+            verification_badge = snapshot.verification_badge if snapshot else user.student_status
+            data.append({"is_me": bool(request and user.pk == request.user.pk), "name": "Tarmac Support" if user.is_staff else display_name, "is_staff": user.is_staff, "identity_type": identity_type, "public_identity_id": public_identity_id, "student_status": verification_badge, "last_seen_at": user.last_seen_at})
         return data
 
     def get_completed_by_me(self, obj):

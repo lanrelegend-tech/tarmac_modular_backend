@@ -2,7 +2,7 @@ from django.conf import settings
 from django.db import models
 from django.conf import settings
 class Notification(models.Model):
-    class Channel(models.TextChoices): EMAIL="email","Email"; WHATSAPP="whatsapp","WhatsApp"; IN_APP="in_app","In-app"
+    class Channel(models.TextChoices): EMAIL="email","Email"; WHATSAPP="whatsapp","WhatsApp"; IN_APP="in_app","In-app"; PUSH="push","Phone push"
     user=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="notifications"); channel=models.CharField(max_length=12,choices=Channel.choices)
     subject=models.CharField(max_length=180,blank=True); body=models.TextField(); data=models.JSONField(default=dict,blank=True); is_sent=models.BooleanField(default=False); is_read=models.BooleanField(default=False); created_at=models.DateTimeField(auto_now_add=True)
     attempts = models.PositiveSmallIntegerField(default=0)

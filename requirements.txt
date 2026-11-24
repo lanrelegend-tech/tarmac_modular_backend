@@ -12,5 +12,6 @@ redis>=5.0,<7.0
 pywebpush>=2.0,<3.0
 gunicorn>=23.0
 whitenoise>=6.9
+sentry-sdk[django]>=2.0,<3.0
 
 pywebpush>=2.0,<3.0

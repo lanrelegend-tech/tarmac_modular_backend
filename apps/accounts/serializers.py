@@ -42,8 +42,14 @@ class UserSerializer(serializers.ModelSerializer):
     username_change_available_at = serializers.SerializerMethodField()
     class Meta:
         model = User
-        fields = ("id", "public_id", "username", "username_change_available_at", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "area", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "is_student_verified", "is_hostel_agent", "can_access_student_features", "can_publish_announcements", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
+        fields = ("id", "public_id", "username", "username_change_available_at", "first_name", "last_name", "email", "email_verified", "date_joined", "last_seen_at", "matric_number", "department", "faculty", "level", "course", "course_name", "entry_year", "student_status", "phone_number", "whatsapp_number", "campus", "area", "bio", "profile_picture_url", "role", "is_staff", "is_superuser", "staff_notification_sections", "is_student_verified", "is_hostel_agent", "can_access_student_features", "can_publish_announcements", "notification_email_enabled", "notification_whatsapp_enabled", "public_profile_picture_enabled")
         read_only_fields = fields
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        if not instance.is_staff or not (request and request.user.is_authenticated and (request.user.pk == instance.pk or request.user.is_superuser)):
+            data.pop("staff_notification_sections", None)
+        return data
     def get_profile_picture_url(self, obj):
         if not obj.profile_picture:
             return None

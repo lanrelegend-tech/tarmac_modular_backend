@@ -19,6 +19,7 @@ from django.db.models import Count, Sum
 from django.db.models.functions import TruncDate
 from django.db.models import Prefetch
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from apps.accounts.permissions import IsVerifiedStudent
 from apps.accounts.permissions import is_student_feature_eligible
 from apps.accounts.models import User, ProfileChangeRequest, ProfileChangeMessage, CourseProgram, AccountActionToken
@@ -39,11 +40,13 @@ from .serializers import UserReportSerializer,AnnouncementSerializer,Announcemen
 from apps.accounts.serializers import AdminProfileChangeRequestSerializer, ProfileUpdateSerializer
 from apps.notifications.services import notify_user
 from config.storage import optimized_image_response
+from config.throttles import ActionRateLimitMixin
 import logging
 
 logger = logging.getLogger(__name__)
 
-class UserReportViewSet(viewsets.ModelViewSet):
+class UserReportViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {"create": "user_report_create"}
     serializer_class=UserReportSerializer
     http_method_names = ["get", "post", "patch", "head", "options"]
     filterset_fields = ["is_resolved", "reason"]
@@ -60,8 +63,8 @@ class UserReportViewSet(viewsets.ModelViewSet):
     def perform_create(self,serializer):
         report = serializer.save(reporter=self.request.user)
         if PlatformSettings.get_solo().report_notifications_enabled:
-            for administrator in User.objects.filter(is_staff=True, is_active=True):
-                notify_user(administrator, "New student report", f"A student submitted report #{report.pk}. Open the admin report queue to review it.", {"kind":"user_report", "report_id":report.pk}, f"user-report:{report.pk}:admin:{administrator.pk}")
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("reports", "New student report", f"A student submitted report #{report.pk}. Open the admin report queue to review it.", {"kind":"user_report", "report_id":report.pk}, f"user-report:{report.pk}")
 
     def perform_update(self, serializer):
         if not self.request.user.is_staff:
@@ -87,19 +90,48 @@ class UserReportViewSet(viewsets.ModelViewSet):
         notify_user(report.reported_user, "Official Tarmac warning", note, {"kind": "admin_warning", "report_id": report.pk}, f"admin-warning:{report.pk}")
         AdminLog.objects.create(actor=request.user, action="user_warning_issued", target_type="User", target_id=str(report.reported_user_id), metadata={"report_id": report.pk, "note": note})
         return Response({"warned": True})
-class AnnouncementViewSet(viewsets.ModelViewSet):
+class AnnouncementViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "announcement_write",
+        "update": "announcement_write",
+        "partial_update": "announcement_write",
+        "publish": "announcement_write",
+        "toggle_saved": "favourite_write",
+    }
     serializer_class=AnnouncementSerializer
     def get_queryset(self):
         if has_announcement_publisher_access(self.request.user):
-            return Announcement.objects.filter(created_by=self.request.user).select_related("created_by").order_by("-created_at")
-        if self.request.user.is_staff:
-            return Announcement.objects.select_related("created_by").all()
-        return Announcement.objects.none() if not PlatformSettings.get_solo().announcements_enabled else Announcement.objects.filter(is_published=True, is_archived=False).filter(
-            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
-        ).filter(
-            models.Q(audience=Announcement.Audience.ALL_VERIFIED) |
-            models.Q(audience=Announcement.Audience.DEPARTMENT, department__iexact=self.request.user.department)
-        ).select_related("created_by").order_by("-published_at", "-created_at")
+            queryset = Announcement.objects.filter(created_by=self.request.user).select_related("created_by").prefetch_related("gallery_images").order_by("-created_at")
+        elif self.request.user.is_staff:
+            queryset = Announcement.objects.select_related("created_by").prefetch_related("gallery_images").all()
+        elif not PlatformSettings.get_solo().announcements_enabled:
+            queryset = Announcement.objects.none()
+        else:
+            queryset = Announcement.objects.filter(is_published=True, is_archived=False).filter(
+                models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
+            ).filter(
+                models.Q(audience=Announcement.Audience.ALL_VERIFIED) |
+                models.Q(audience=Announcement.Audience.DEPARTMENT, department__iexact=self.request.user.department)
+            ).select_related("created_by").prefetch_related("gallery_images").order_by("-published_at", "-created_at")
+
+        # Keep date/time filtering in SQL so it works across paginated results.
+        after_value = self.request.query_params.get("published_after")
+        before_value = self.request.query_params.get("published_before")
+        after = parse_datetime(after_value) if after_value else None
+        before = parse_datetime(before_value) if before_value else None
+        if (after_value and after is None) or (before_value and before is None):
+            raise ValidationError({"published_at": "Use valid date and time values."})
+        if after and timezone.is_naive(after):
+            after = timezone.make_aware(after, timezone.get_current_timezone())
+        if before and timezone.is_naive(before):
+            before = timezone.make_aware(before, timezone.get_current_timezone())
+        if after and before and after > before:
+            raise ValidationError({"published_at": "The start date and time must be before the end date and time."})
+        if after:
+            queryset = queryset.filter(published_at__gte=after)
+        if before:
+            queryset = queryset.filter(published_at__lte=before)
+        return queryset
     def get_permissions(self):
         if self.action in ("saved", "toggle_saved"):
             return [IsVerifiedStudent()]
@@ -649,7 +681,7 @@ def dashboard(request):
 @drf_permission_classes([IsModeratorOrAbove])
 def queue_counts(request):
     """Small navigation badge payload; avoids fetching full admin dashboard data."""
-    cached = cache.get("tarmac.admin.queue_counts.v1")
+    cached = cache.get(f"tarmac.admin.queue_counts.v2.{request.user.pk}")
     if cached is not None:
         return Response(cached)
     payload = {
@@ -664,7 +696,12 @@ def queue_counts(request):
         "ads": AdCampaign.objects.filter(status=AdCampaign.Status.PENDING_REVIEW).count() + AdWaitlistEntry.objects.filter(status=AdWaitlistEntry.Status.WAITING).count(),
         "support": SupportTicket.objects.filter(status__in=(SupportTicket.Status.OPEN, SupportTicket.Status.IN_PROGRESS)).count(),
     }
-    cache.set("tarmac.admin.queue_counts.v1", payload, 5)
+    if not request.user.is_superuser:
+        assigned = set(request.user.staff_notification_sections or [])
+        if "profile_changes" in assigned:
+            payload["profile_changes"] = ProfileChangeRequest.objects.filter(status=ProfileChangeRequest.Status.PENDING).count()
+        payload = {section: count if section in assigned else 0 for section, count in payload.items()}
+    cache.set(f"tarmac.admin.queue_counts.v2.{request.user.pk}", payload, 5)
     return Response(payload)
 
 @api_view(["GET"])
@@ -808,7 +845,11 @@ def system_logo(request):
         raise NotFound("The site logo has not been set.")
     return optimized_image_response(config.site_logo)
 
-class SupportTicketViewSet(viewsets.ModelViewSet):
+class SupportTicketViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
+    action_throttle_scopes = {
+        "create": "support_ticket_create",
+        "reply": "support_reply",
+    }
     serializer_class = SupportTicketSerializer
     permission_classes = [IsAdminOrAbove | IsVerifiedStudent]
     http_method_names = ["get", "post", "patch", "head", "options"]
@@ -824,18 +865,11 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         ticket = serializer.save(user=self.request.user)
-        from apps.notifications.services import notify_user
-        for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=self.request.user.pk).iterator():
-            try:
-                notify_user(administrator, "New student support request", ticket.subject, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"support-ticket:{ticket.pk}:{administrator.pk}")
-            except Exception:
-                # A notification provider/cache failure must not make a saved
-                # support request appear to fail to the student.
-                logger.exception(
-                    "Could not notify administrator %s about support ticket %s",
-                    administrator.pk,
-                    ticket.pk,
-                )
+        from apps.notifications.staff import notify_staff_section
+        try:
+            notify_staff_section("support", "New student support request", ticket.subject, {"kind": "support_ticket", "ticket_id": ticket.pk}, f"support-ticket:{ticket.pk}")
+        except Exception:
+            logger.exception("Could not notify staff about support ticket %s", ticket.pk)
 
     def perform_update(self, serializer):
         previous_status = serializer.instance.status
@@ -855,8 +889,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         AdminLog.objects.create(actor=request.user, action="support_ticket_reopened", target_type="SupportTicket", target_id=str(ticket.pk), metadata={})
         notify_user(ticket.user, "Tarmac support request reopened", f'Your support request "{ticket.subject}" has been reopened.', {"kind":"support_ticket_reopened", "ticket_id":ticket.pk}, f"support-ticket-reopen:{ticket.pk}:{ticket.updated_at.timestamp()}:{ticket.user_id}")
         if not request.user.is_staff:
-            for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=request.user.pk).iterator():
-                notify_user(administrator, "Student reopened a support request", ticket.subject, {"kind":"support_ticket_reopened", "ticket_id":ticket.pk}, f"support-ticket-reopen:{ticket.pk}:{ticket.updated_at.timestamp()}:{administrator.pk}")
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("support", "Student reopened a support request", ticket.subject, {"kind":"support_ticket_reopened", "ticket_id":ticket.pk}, f"support-ticket-reopen:{ticket.pk}:{ticket.updated_at.timestamp()}")
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
     @action(detail=True, methods=("post",))
@@ -872,8 +906,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             notify_user(ticket.user, "Tarmac support request completed", f'Your support request "{ticket.subject}" was marked completed by Tarmac Support.', {"kind": "support_completed", "ticket_id": ticket.pk}, f"support-completed:{ticket.pk}:{ticket.updated_at.timestamp()}:{ticket.user_id}")
         else:
             notify_user(ticket.user, "Support request marked complete", f'You marked "{ticket.subject}" as completed. Reopen it from Support if you still need help.', {"kind": "support_completed", "ticket_id": ticket.pk}, f"support-completed:{ticket.pk}:{ticket.updated_at.timestamp()}:{ticket.user_id}")
-            for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=request.user.pk).iterator():
-                notify_user(administrator, "Student marked a support request complete", ticket.subject, {"kind": "support_completed", "ticket_id": ticket.pk}, f"support-completed:{ticket.pk}:{ticket.updated_at.timestamp()}:{administrator.pk}")
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("support", "Student marked a support request complete", ticket.subject, {"kind": "support_completed", "ticket_id": ticket.pk}, f"support-completed:{ticket.pk}:{ticket.updated_at.timestamp()}")
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
     @action(detail=True, methods=("post",))
@@ -920,8 +954,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         if request.user.is_staff:
             notify_user(ticket.user, f"Support replied: {ticket.subject}", body[:500], {"kind": "support_reply", "ticket_id": ticket.pk}, f"support-reply:{message.pk}:{ticket.user_id}")
         else:
-            for administrator in User.objects.filter(is_staff=True, is_active=True).exclude(pk=request.user.pk).iterator():
-                notify_user(administrator, f"Student replied: {ticket.subject}", body[:500], {"kind": "support_reply", "ticket_id": ticket.pk}, f"support-reply:{message.pk}:{administrator.pk}")
+            from apps.notifications.staff import notify_staff_section
+            notify_staff_section("support", f"Student replied: {ticket.subject}", body[:500], {"kind": "support_reply", "ticket_id": ticket.pk}, f"support-reply:{message.pk}")
         ticket.refresh_from_db()
         return Response(SupportTicketSerializer(ticket, context={"request": request}).data)
 
@@ -1039,12 +1073,17 @@ class AdminAdministratorViewSet(viewsets.GenericViewSet):
         role = request.data.get("role", User.Role.ADMIN)
         if role not in self.STAFF_ROLES:
             raise ValidationError({"role": "Choose moderator, admin, or super_admin."})
+        from apps.notifications.staff import valid_staff_sections
+        sections = request.data.get("staff_notification_sections", [])
+        if not valid_staff_sections(sections):
+            raise ValidationError({"staff_notification_sections": "Choose valid notification sections."})
 
         account.is_staff = True
         account.is_superuser = role == User.Role.SUPER_ADMIN
         account.role = self.STAFF_ROLES[role]
-        account.save(update_fields=("is_staff", "is_superuser", "role"))
-        AdminLog.objects.create(actor=request.user, action="administrator_access_granted", target_type="User", target_id=str(account.pk), metadata={"role": role})
+        account.staff_notification_sections = [] if account.is_superuser else sections
+        account.save(update_fields=("is_staff", "is_superuser", "role", "staff_notification_sections"))
+        AdminLog.objects.create(actor=request.user, action="administrator_access_granted", target_type="User", target_id=str(account.pk), metadata={"role": role, "staff_notification_sections": account.staff_notification_sections})
         event_key = f"administrator-access:{account.pk}:granted:{request.user.pk}:{timezone.now().timestamp()}"
         transaction.on_commit(lambda: notify_user(account, "Tarmac staff access granted", f"A Tarmac superuser granted {role.replace('_', ' ')} access to your account. Contact Tarmac Support immediately if you did not expect this change.", {"kind": "account_enforcement", "notification_category": "account_security", "staff_role": role}, event_key))
         return Response(self.get_serializer(account).data, status=status.HTTP_201_CREATED)
@@ -1065,12 +1104,29 @@ class AdminAdministratorViewSet(viewsets.GenericViewSet):
 
         account.role = self.STAFF_ROLES[role]
         account.is_superuser = role == User.Role.SUPER_ADMIN
-        account.save(update_fields=("role", "is_superuser"))
+        if account.is_superuser:
+            account.staff_notification_sections = []
+        account.save(update_fields=("role", "is_superuser", "staff_notification_sections"))
         for outstanding in OutstandingToken.objects.filter(user=account):
             BlacklistedToken.objects.get_or_create(token=outstanding)
-        AdminLog.objects.create(actor=request.user, action="administrator_role_changed", target_type="User", target_id=str(account.pk), metadata={"role": role})
+        AdminLog.objects.create(actor=request.user, action="administrator_role_changed", target_type="User", target_id=str(account.pk), metadata={"role": role, "staff_notification_sections": account.staff_notification_sections})
         event_key = f"administrator-role:{account.pk}:{role}:{request.user.pk}:{timezone.now().timestamp()}"
         transaction.on_commit(lambda: notify_user(account, "Tarmac staff role updated", f"A Tarmac superadmin changed your staff role to {role.replace('_', ' ')}. You may need to sign in again.", {"kind": "account_enforcement", "notification_category": "account_security", "staff_role": role}, event_key))
+        return Response(self.get_serializer(account).data)
+
+    @action(detail=True, methods=["patch"], url_path="notification-sections")
+    @transaction.atomic
+    def notification_sections(self, request, pk=None):
+        account = get_object_or_404(User.objects.select_for_update(), pk=pk, is_staff=True)
+        if account.is_superuser:
+            raise ValidationError({"staff_notification_sections": "Superadmins automatically receive alerts for every section."})
+        sections = request.data.get("staff_notification_sections")
+        from apps.notifications.staff import valid_staff_sections
+        if not valid_staff_sections(sections):
+            raise ValidationError({"staff_notification_sections": "Choose valid notification sections."})
+        account.staff_notification_sections = sections
+        account.save(update_fields=("staff_notification_sections",))
+        AdminLog.objects.create(actor=request.user, action="staff_notification_sections_updated", target_type="User", target_id=str(account.pk), metadata={"staff_notification_sections": sections})
         return Response(self.get_serializer(account).data)
 
     @action(detail=True, methods=["post"], url_path="revoke")
@@ -1087,7 +1143,8 @@ class AdminAdministratorViewSet(viewsets.GenericViewSet):
         account.is_staff = False
         account.is_superuser = False
         account.role = User.Role.STUDENT
-        account.save(update_fields=("is_staff", "is_superuser", "role"))
+        account.staff_notification_sections = []
+        account.save(update_fields=("is_staff", "is_superuser", "role", "staff_notification_sections"))
         for outstanding in OutstandingToken.objects.filter(user=account):
             BlacklistedToken.objects.get_or_create(token=outstanding)
         AdminLog.objects.create(actor=request.user, action="administrator_access_revoked", target_type="User", target_id=str(account.pk))

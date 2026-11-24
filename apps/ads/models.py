@@ -159,3 +159,13 @@ class AdImpression(models.Model):
             models.UniqueConstraint(fields=("campaign", "user", "day"), condition=models.Q(user__isnull=False), name="unique_daily_user_ad_impression"),
             models.UniqueConstraint(fields=("campaign", "visitor_hash", "day"), condition=~models.Q(visitor_hash=""), name="unique_daily_visitor_ad_impression"),
         ]
+
+
+class AdBookmark(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="saved_ad_campaigns")
+    campaign = models.ForeignKey(AdCampaign, on_delete=models.CASCADE, related_name="bookmarks")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [models.UniqueConstraint(fields=("user", "campaign"), name="unique_user_ad_bookmark")]
