@@ -122,13 +122,6 @@ class ProductSerializer(serializers.ModelSerializer):
         return obj.seller.student_status if obj.seller.is_student_verified else "pending"
     def validate_campus(self, value):
         return validate_campus_choice(value)
-    def validate(self, attrs):
-        attrs = super().validate(attrs)
-        if "area" in attrs or self.instance is None:
-            campus = attrs.get("campus", getattr(self.instance, "campus", ""))
-            area = attrs.get("area", getattr(self.instance, "area", ""))
-            attrs["area"] = validate_area_choice(campus, area)
-        return attrs
     def get_is_featured(self, obj):
         from django.utils import timezone
         from apps.administration.models import PlatformSettings
@@ -156,6 +149,11 @@ class ProductSerializer(serializers.ModelSerializer):
         return fields
 
     def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if "area" in attrs or self.instance is None:
+            campus = attrs.get("campus", getattr(self.instance, "campus", ""))
+            area = attrs.get("area", getattr(self.instance, "area", ""))
+            attrs["area"] = validate_area_choice(campus, area)
         identity_type = attrs.get("identity_type", getattr(self.instance, "identity_type", Product.IdentityType.NORMAL))
         visibility = attrs.get("visibility", getattr(self.instance, "visibility", Product.Visibility.PUBLIC))
         audience_public_ids = attrs.get("audience_public_ids", None)

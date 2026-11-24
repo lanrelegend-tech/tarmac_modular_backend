@@ -571,18 +571,26 @@ class AdminPaymentSerializer(serializers.ModelSerializer):
 
 class AdminLostFoundSerializer(serializers.ModelSerializer):
     reporter_id = serializers.IntegerField(read_only=True)
-    category_name = serializers.CharField(source="category.name", read_only=True, allow_null=True)
+    reporter_public_id = serializers.UUIDField(source="reporter.public_id", read_only=True)
+    reporter_name = serializers.SerializerMethodField()
+    reporter_email = serializers.EmailField(source="reporter.email", read_only=True)
+    contact_details = serializers.CharField(read_only=True)
+    category_name = serializers.SerializerMethodField()
     image_url = serializers.SerializerMethodField()
     class Meta:
         from apps.lost_found.models import LostFoundReport
         model = LostFoundReport
-        fields = ("id", "reporter_id", "report_type", "title", "description", "category", "category_name", "colour", "location", "campus", "incident_date", "image_url", "status", "is_active", "deleted_at", "created_at")
-        read_only_fields = ("id", "reporter_id", "report_type", "title", "description", "category", "category_name", "colour", "location", "campus", "incident_date", "image_url", "deleted_at", "created_at")
+        fields = ("id", "reporter_id", "reporter_public_id", "reporter_name", "reporter_email", "contact_details", "report_type", "title", "description", "category", "category_name", "category_label", "reward", "reviewer_note", "colour", "location", "campus", "incident_date", "image_url", "status", "is_active", "deleted_at", "created_at")
+        read_only_fields = ("id", "reporter_id", "reporter_public_id", "reporter_name", "reporter_email", "contact_details", "report_type", "title", "description", "category", "category_name", "category_label", "reward", "colour", "location", "campus", "incident_date", "image_url", "deleted_at", "created_at")
+    def get_reporter_name(self, obj):
+        return obj.reporter.get_full_name().strip() or obj.reporter.username
     def get_image_url(self, obj):
         if not obj.image: return None
         request = self.context.get("request")
         path = f"/api/admin-tools/lost-found/{obj.pk}/image/"
         return request.build_absolute_uri(path) if request else path
+    def get_category_name(self, obj):
+        return obj.category_label or (obj.category.name if obj.category_id else "Other")
 
 class AdminItemClaimSerializer(serializers.ModelSerializer):
     claimant_name = serializers.SerializerMethodField()

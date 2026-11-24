@@ -7,11 +7,13 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
     image = serializers.ImageField(write_only=True, required=False, allow_null=True)
     identifying_details = serializers.CharField(write_only=True, required=False, allow_blank=True)
     contact_details = serializers.CharField(write_only=True, required=False, allow_blank=True)
-    category_name = serializers.CharField(source="category.name", read_only=True)
+    category_label = serializers.CharField(required=False, allow_blank=False, max_length=80, write_only=True)
+    category_name = serializers.SerializerMethodField()
+    reporter_name = serializers.SerializerMethodField()
     image_url = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
     reporter_public_id = serializers.SerializerMethodField()
-    class Meta: model=LostFoundReport; fields=("id","public_id","report_type","title","description","category","category_name","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner","reporter_public_id"); read_only_fields=("public_id","status","created_at","is_owner","reporter_public_id")
+    class Meta: model=LostFoundReport; fields=("id","public_id","report_type","title","description","category","category_label","category_name","reporter_name","reward","reviewer_note","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner","reporter_public_id"); read_only_fields=("public_id","status","reviewer_note","created_at","is_owner","reporter_name","reporter_public_id")
     def validate_campus(self, value): return validate_campus_choice(value)
     def get_is_owner(self, obj):
         request = self.context.get("request")
@@ -21,6 +23,15 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
         if user.is_active and not user.is_suspended and user.is_student_verified and user.public_profile_enabled:
             return str(user.public_id)
         return ""
+    def get_category_name(self, obj):
+        return obj.category_label or (obj.category.name if obj.category_id else "Other")
+    def get_reporter_name(self, obj):
+        user = obj.reporter
+        if not user.public_profile_enabled or not user.is_active or user.is_suspended:
+            return "Verified student"
+        if user.public_name_enabled:
+            return user.get_full_name().strip() or user.username
+        return user.username
     def get_image_url(self, obj):
         if not obj.image:
             return None

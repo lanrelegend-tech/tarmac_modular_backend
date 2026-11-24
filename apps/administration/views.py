@@ -27,6 +27,7 @@ from apps.reviews.models import ReviewReport, SellerReview
 from apps.products.models import Product
 from apps.payments.models import Payment
 from apps.lost_found.models import LostFoundReport, ItemMatch, ItemClaim
+from apps.lost_found.services import create_possible_matches
 from apps.ads.models import AdCampaign, AdWaitlistEntry
 from apps.jobs.models import JobListing, JobReport
 from apps.accommodation.models import AccommodationListing, HostelAgentRequest
@@ -657,7 +658,7 @@ def queue_counts(request):
         "marketplace": Product.objects.filter(status=Product.Status.PENDING_REVIEW).count(),
         "jobs": JobListing.objects.filter(status=JobListing.Status.PENDING_REVIEW).count() + JobReport.objects.filter(status__in=(JobReport.Status.OPEN, JobReport.Status.REVIEWING)).count(),
         "accommodation": AccommodationListing.objects.filter(status=AccommodationListing.Status.PENDING_REVIEW).count() + HostelAgentRequest.objects.filter(status=HostelAgentRequest.Status.PENDING).count(),
-        "lost_found": ItemClaim.objects.filter(status=ItemClaim.Status.PENDING).count() + ItemMatch.objects.filter(is_reviewed=False, is_dismissed=False).count(),
+        "lost_found": LostFoundReport.objects.filter(status=LostFoundReport.Status.PENDING_REVIEW).count() + ItemClaim.objects.filter(status=ItemClaim.Status.PENDING).count() + ItemMatch.objects.filter(is_reviewed=False, is_dismissed=False).count(),
         "reports": UserReport.objects.filter(is_resolved=False).count(),
         "reviews": SellerReview.objects.filter(status=SellerReview.Status.PENDING).count() + ReviewReport.objects.filter(status__in=(ReviewReport.Status.OPEN, ReviewReport.Status.REVIEWING)).count(),
         "ads": AdCampaign.objects.filter(status=AdCampaign.Status.PENDING_REVIEW).count() + AdWaitlistEntry.objects.filter(status=AdWaitlistEntry.Status.WAITING).count(),
@@ -1224,8 +1225,23 @@ class AdminLostFoundViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return LostFoundReport.objects.select_related("reporter", "category").order_by("-created_at")
     def perform_update(self, serializer):
+        old_status = serializer.instance.status
+        next_status = serializer.validated_data.get("status", old_status)
+        if next_status == LostFoundReport.Status.REJECTED and not serializer.validated_data.get("reviewer_note", serializer.instance.reviewer_note).strip():
+            raise ValidationError({"reviewer_note": "Add a reason so the student knows why this report was rejected."})
+        if next_status == LostFoundReport.Status.OPEN:
+            serializer.validated_data["is_active"] = True
+        elif next_status in (LostFoundReport.Status.REJECTED, LostFoundReport.Status.CLOSED, LostFoundReport.Status.RETURNED):
+            serializer.validated_data["is_active"] = False
         report = serializer.save()
         AdminLog.objects.create(actor=self.request.user, action="lost_found_report_moderated", target_type="LostFoundReport", target_id=str(report.pk), metadata={"status": report.status, "is_active": report.is_active})
+        if report.status != old_status and report.status in (LostFoundReport.Status.OPEN, LostFoundReport.Status.REJECTED):
+            approved = report.status == LostFoundReport.Status.OPEN
+            subject = "Your Lost & Found report was approved" if approved else "Your Lost & Found report needs changes"
+            body = f'“{report.title}” is now visible to students.' if approved else f'“{report.title}” was not approved. Reason: {report.reviewer_note}'
+            notify_user(report.reporter, subject, body, {"kind": "lost_found_review", "report_id": report.pk, "status": report.status, "link": "/lost-found", "notification_category": "lost_found"}, f"lost-found-review:{report.pk}:{report.status}", dispatch_email=True)
+            if approved:
+                create_possible_matches(report)
     @action(detail=True, methods=("get",), url_path="image")
     def image(self, request, pk=None):
         report = self.get_object()

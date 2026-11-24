@@ -1,5 +1,6 @@
 from django.db import models, transaction
 from django.db.models import Count
+from django.db.models import Q
 from django.utils import timezone
 from django.http import FileResponse
 from rest_framework import viewsets, permissions
@@ -23,15 +24,23 @@ class LostFoundReportViewSet(viewsets.ModelViewSet):
     search_fields = ["title", "description", "location", "colour", "identifying_details"]
     filterset_fields = ["id", "public_id", "report_type", "category", "status"]
     def get_queryset(self):
-        queryset = LostFoundReport.objects.select_related("reporter", "category").filter(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
+        queryset = LostFoundReport.objects.select_related("reporter", "category").filter(
+            Q(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
+        )
+        if self.request.user.is_authenticated:
+            queryset = LostFoundReport.objects.select_related("reporter", "category").filter(
+                Q(is_active=True, status__in=(LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED))
+                | Q(reporter=self.request.user, status__in=(LostFoundReport.Status.PENDING_REVIEW, LostFoundReport.Status.REJECTED))
+            )
         campus = self.request.query_params.get("campus")
         return queryset.filter(campus__iexact=campus.strip()[:120]) if campus else queryset
     def perform_create(self,serializer):
-        report=serializer.save(reporter=self.request.user); create_possible_matches(report)
+        serializer.save(reporter=self.request.user, status=LostFoundReport.Status.PENDING_REVIEW, is_active=False)
     def perform_update(self,serializer):
         if serializer.instance.reporter_id!=self.request.user.id: raise PermissionDenied("You can only update your own report.")
         report = serializer.save()
-        create_possible_matches(report)
+        if report.is_active and report.status in (LostFoundReport.Status.OPEN, LostFoundReport.Status.MATCHED):
+            create_possible_matches(report)
     def perform_destroy(self, instance):
         if instance.reporter_id != self.request.user.id:
             raise PermissionDenied("You can only delete your own report.")
