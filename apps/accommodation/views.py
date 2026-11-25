@@ -100,6 +100,13 @@ class AccommodationListingViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
             raise PermissionDenied("You can only remove your own accommodation post.")
         instance.status = AccommodationListing.Status.REMOVED
         instance.save(update_fields=("status", "updated_at"))
+        AdminLog.objects.create(
+            actor=self.request.user,
+            action="accommodation_listing_owner_removed",
+            target_type="AccommodationListing",
+            target_id=str(instance.pk),
+            metadata={"title": instance.title, "owner_id": instance.owner_id, "removed_at": instance.updated_at.isoformat()},
+        )
 
     @action(detail=True, methods=("post",))
     def filled(self, request, pk=None):

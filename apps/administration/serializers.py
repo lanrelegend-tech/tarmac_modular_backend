@@ -37,8 +37,8 @@ class UserReportSerializer(serializers.ModelSerializer):
 
     def validate_evidence_images(self, images):
         for image in images:
-            if image.size > 5 * 1024 * 1024:
-                raise serializers.ValidationError("Each screenshot must be 5 MB or smaller.")
+            if image.size > 25 * 1024 * 1024:
+                raise serializers.ValidationError("Each screenshot must be 25 MB or smaller before compression.")
         return images
 
     def validate(self, attrs):
@@ -146,8 +146,8 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         return obj.image.url
 
     def validate_image(self, image):
-        if image and image.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Announcement images must be 5 MB or smaller.")
+        if image and image.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Announcement images must be 25 MB or smaller before compression.")
         return image
 
     def validate_poster_name(self, value):
@@ -157,8 +157,8 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         return value
 
     def validate_gallery_images(self, images):
-        if any(image.size > 5 * 1024 * 1024 for image in images):
-            raise serializers.ValidationError("Each announcement image must be 5 MB or smaller.")
+        if any(image.size > 25 * 1024 * 1024 for image in images):
+            raise serializers.ValidationError("Each announcement image must be 25 MB or smaller before compression.")
         return images
 
     def get_image_urls(self, obj):
@@ -515,10 +515,11 @@ class SupportTicketSerializer(serializers.ModelSerializer):
         if len(uploads) > 5:
             raise serializers.ValidationError({"attachment_files": "Attach at most five files."})
         for upload in uploads:
-            if upload.size > 5 * 1024 * 1024:
-                raise serializers.ValidationError({"attachment_files": "Each file must be 5 MB or smaller."})
             if upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
                 raise serializers.ValidationError({"attachment_files": "Only JPG, PNG, WEBP and PDF files are accepted."})
+            limit = 5 if upload.content_type == "application/pdf" else 25
+            if upload.size > limit * 1024 * 1024:
+                raise serializers.ValidationError({"attachment_files": f"Images must be 25 MB and PDFs 5 MB or smaller."})
         return attrs
     def create(self, validated_data):
         from django.db import transaction
@@ -569,7 +570,7 @@ class PlatformSettingsSerializer(serializers.ModelSerializer):
         data["whatsapp_phone_number_id"] = instance.whatsapp_phone_number_id or os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
         return data
     def validate_site_logo(self, image):
-        if image and image.size > 2 * 1024 * 1024: raise serializers.ValidationError("The logo must be 2 MB or smaller.")
+        if image and image.size > 25 * 1024 * 1024: raise serializers.ValidationError("The logo must be 25 MB or smaller before compression.")
         if image and image.content_type not in ("image/jpeg", "image/png", "image/webp"): raise serializers.ValidationError("Use a PNG, JPG or WEBP logo.")
         return image
     def validate_max_product_images(self, value):

@@ -11,6 +11,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import generics, permissions, viewsets
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
@@ -174,9 +175,16 @@ def confirm_account_deletion(request):
     response.delete_cookie(settings.AUTH_REFRESH_COOKIE, path="/api/auth/", samesite=settings.AUTH_COOKIE_SAMESITE)
     return response
 
+class CourseProgramPagination(PageNumberPagination):
+    page_size = 100
+    page_size_query_param = "page_size"
+    max_page_size = 200
+
+
 class CourseProgramViewSet(viewsets.ModelViewSet):
     serializer_class = CourseProgramSerializer
     queryset = CourseProgram.objects.all()
+    pagination_class = CourseProgramPagination
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
@@ -187,6 +195,15 @@ class CourseProgramViewSet(viewsets.ModelViewSet):
         if self.action in ("list", "retrieve"):
             return [permissions.AllowAny()]
         return [IsAdminOrAbove()]
+
+    def perform_update(self, serializer):
+        program = serializer.save()
+        User.objects.filter(course=program).update(department=program.name, faculty=program.faculty)
+
+    def perform_destroy(self, instance):
+        if User.objects.filter(course=instance).exists():
+            raise ValidationError({"detail": "This department is assigned to student accounts. Deactivate it to remove it from signup while preserving their records."})
+        instance.delete()
 
 class RegisterView(generics.CreateAPIView):
     queryset=User.objects.all(); serializer_class=RegisterSerializer; permission_classes=[permissions.AllowAny]

@@ -21,6 +21,11 @@ from django.core.files.storage import FileSystemStorage
 from django.http import FileResponse
 from django.utils.deconstruct import deconstructible
 from PIL import Image, ImageOps, UnidentifiedImageError
+from rest_framework.exceptions import ValidationError
+
+MAX_UPLOAD_IMAGE_PIXELS = 30_000_000
+MAX_RAW_IMAGE_UPLOAD_BYTES = 25 * 1024 * 1024
+ALLOWED_UPLOAD_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 
 
 def optimized_image_response(image_field, cache_seconds=600):
@@ -36,19 +41,40 @@ def optimized_image_response(image_field, cache_seconds=600):
     return response
 
 
-def optimize_uploaded_image(content, max_size=(1600, 1600), quality=78):
+def optimize_uploaded_image(content, max_size=(1600, 1600), quality=78, max_output_bytes=2 * 1024 * 1024):
     """Normalize an uploaded raster image to a small, orientation-correct WebP."""
+    if getattr(content, "size", 0) > MAX_RAW_IMAGE_UPLOAD_BYTES:
+        raise ValidationError("Images must be 25 MB or smaller before compression.")
     content.seek(0)
     try:
         with Image.open(content) as source:
+            if source.format not in ALLOWED_UPLOAD_IMAGE_FORMATS:
+                raise ValidationError("Use a JPG, PNG, or WEBP image.")
+            width, height = source.size
+            if width <= 0 or height <= 0 or width * height > MAX_UPLOAD_IMAGE_PIXELS:
+                raise ValidationError("Image dimensions are too large. Resize the image and try again.")
             image = ImageOps.exif_transpose(source)
             image.thumbnail(max_size, Image.Resampling.LANCZOS)
             has_alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
             image = image.convert("RGBA" if has_alpha else "RGB")
-            output = BytesIO()
-            image.save(output, format="WEBP", quality=quality, method=5)
+            minimum_dimension = max(480, min(max_size) // 2)
+            current_quality = quality
+            while True:
+                output = BytesIO()
+                image.save(output, format="WEBP", quality=current_quality, method=5)
+                if output.tell() <= max_output_bytes:
+                    break
+                if current_quality > 52:
+                    current_quality = max(52, current_quality - 8)
+                    continue
+                width, height = image.size
+                if max(width, height) <= minimum_dimension:
+                    raise ValidationError("This image cannot be compressed enough. Choose a smaller image.")
+                next_size = (max(1, int(width * 0.85)), max(1, int(height * 0.85)))
+                image = image.resize(next_size, Image.Resampling.LANCZOS)
+                current_quality = 64
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as error:
-        raise ValueError("Upload a valid image file.") from error
+        raise ValidationError("Upload a valid image file.") from error
     return ContentFile(output.getvalue(), name=f"{uuid4().hex}.webp")
 
 
@@ -81,7 +107,8 @@ class CloudinaryImageStorage(FileSystemStorage):
             max_size, quality = (1920, 1920), 84
         else:
             max_size, quality = (1600, 1600), 78
-        optimized = optimize_uploaded_image(content, max_size=max_size, quality=quality)
+        max_output_bytes = 3 * 1024 * 1024 if "student_ids" in folders else 2 * 1024 * 1024
+        optimized = optimize_uploaded_image(content, max_size=max_size, quality=quality, max_output_bytes=max_output_bytes)
         folder = Path(name.replace("\\", "/")).parent.as_posix()
         if folder == ".":
             folder = "images"

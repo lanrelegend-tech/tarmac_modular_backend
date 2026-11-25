@@ -118,6 +118,6 @@ class AnonymousMarketplaceIdentityAdmin(admin.ModelAdmin):
 
 @admin.register(CourseProgram)
 class CourseProgramAdmin(admin.ModelAdmin):
-    list_display = ("name", "duration_years", "is_active")
+    list_display = ("faculty", "name", "duration_years", "is_active")
     list_filter = ("is_active",)
-    search_fields = ("name",)
+    search_fields = ("faculty", "name")

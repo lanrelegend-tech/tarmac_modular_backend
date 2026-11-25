@@ -515,8 +515,17 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
             raise ValidationError({"status": "This campaign has been paid. Contact Tarmac Support to request cancellation and review any refund."})
         if campaign.payments.filter(status="initialized").exists():
             raise ValidationError({"status": "A Paystack checkout is still open for this campaign. Wait for Paystack to confirm its result before cancelling."})
+        previous_status = campaign.status
         campaign.status = AdCampaign.Status.CANCELLED
         campaign.save(update_fields=("status", "updated_at"))
+        from apps.administration.models import AdminLog
+        AdminLog.objects.create(
+            actor=campaign.advertiser,
+            action="advertiser_ad_campaign_cancelled",
+            target_type="AdCampaign",
+            target_id=str(campaign.pk),
+            metadata={"previous_status": previous_status, "business_advertiser_id": campaign.business_advertiser_id},
+        )
         AdSlotHold.objects.filter(campaign=campaign).delete()
         placements = list(campaign.ad_placements.all()) or ([campaign.ad_placement] if campaign.ad_placement_id else [])
         if campaign.starts_at and campaign.ends_at:

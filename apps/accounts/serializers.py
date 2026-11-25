@@ -21,10 +21,16 @@ def normalize_whatsapp_number(value):
 class CourseProgramSerializer(serializers.ModelSerializer):
     class Meta:
         model = CourseProgram
-        fields = ("id", "name", "duration_years", "is_active")
+        fields = ("id", "name", "faculty", "duration_years", "is_active")
         read_only_fields = ("id",)
 
     def validate_name(self, value):
+        value = value.strip()
+        if len(value) > 120:
+            raise serializers.ValidationError("Department names must be 120 characters or fewer.")
+        return value
+
+    def validate_faculty(self, value):
         return value.strip()
 
     def validate_duration_years(self, value):
@@ -123,7 +129,12 @@ class RegisterSerializer(serializers.ModelSerializer):
     phone_number=serializers.CharField(required=True, max_length=25)
     campus=serializers.CharField(required=True, max_length=120)
     area=serializers.CharField(required=False, allow_blank=True, max_length=120)
-    course=serializers.PrimaryKeyRelatedField(queryset=CourseProgram.objects.filter(is_active=True), required=True)
+    # `course` is retained as an optional compatibility field for older clients.
+    # New clients choose a faculty and department; the department record carries
+    # the configured duration used by the student/alumni status calculation.
+    course=serializers.PrimaryKeyRelatedField(queryset=CourseProgram.objects.filter(is_active=True), required=False, allow_null=True, write_only=True)
+    department=serializers.CharField(required=False, allow_blank=True, max_length=120)
+    faculty=serializers.CharField(required=False, allow_blank=True, max_length=120)
     entry_year=serializers.IntegerField(required=True, min_value=2000)
     class Meta: model=User; fields=("id","public_id","username","first_name","last_name","email","matric_number","phone_number","campus","area","password","department","faculty","level","course","entry_year"); read_only_fields=("id","public_id")
     def validate_email(self, value):
@@ -153,6 +164,31 @@ class RegisterSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         attrs["area"] = validate_area_choice(attrs.get("campus"), attrs.get("area", ""))
+        department = str(attrs.get("department", "")).strip()
+        faculty = str(attrs.get("faculty", "")).strip()
+        selected_program = attrs.get("course")
+        if selected_program:
+            if department and department.casefold() != selected_program.name.casefold():
+                raise serializers.ValidationError({"department": "Select a department listed under the chosen faculty."})
+            if faculty and selected_program.faculty and faculty.casefold() != selected_program.faculty.casefold():
+                raise serializers.ValidationError({"faculty": "The selected department does not belong to that faculty."})
+            department = selected_program.name
+            faculty = faculty or selected_program.faculty
+        else:
+            selected_program = CourseProgram.objects.filter(
+                is_active=True,
+                name__iexact=department,
+                faculty__iexact=faculty,
+            ).first()
+        if not faculty:
+            raise serializers.ValidationError({"faculty": "Choose your faculty."})
+        if not department:
+            raise serializers.ValidationError({"department": "Choose your department."})
+        if not selected_program or not selected_program.is_active:
+            raise serializers.ValidationError({"department": "Choose a department listed under your faculty."})
+        attrs["faculty"] = selected_program.faculty or faculty
+        attrs["department"] = selected_program.name
+        attrs["course"] = selected_program
         return attrs
     def validate_password(self, value):
         validate_password(value)
@@ -197,8 +233,8 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         return validate_area_choice(campus, value)
 
     def validate_profile_picture(self, image):
-        if image and image.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Profile pictures must be 5 MB or smaller.")
+        if image and image.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Profile pictures must be 25 MB or smaller before compression.")
         return image
 
     def validate_username(self, value):
@@ -275,12 +311,12 @@ class StudentVerificationSerializer(serializers.ModelSerializer):
         return attrs
 
     def validate_student_id_image(self, image):
-        if image and image.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Student ID images must be 5 MB or smaller.")
+        if image and image.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Student ID images must be 25 MB or smaller before compression.")
         return image
     def validate_profile_picture(self, image):
-        if image and image.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Your profile photo must be 5 MB or smaller.")
+        if image and image.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Your profile photo must be 25 MB or smaller before compression.")
         return image
     def validate_submitted_matric_number(self, value):
         value = value.strip().upper()
@@ -321,8 +357,8 @@ class StudentProfileChangeRequestSerializer(serializers.ModelSerializer):
         read_only_fields = ("requested_changes", "original_values", "status", "messages", "created_at", "updated_at")
 
     def validate_profile_picture(self, image):
-        if image.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Profile pictures must be 5 MB or smaller.")
+        if image.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Profile pictures must be 25 MB or smaller before compression.")
         return image
 
     def validate_changes(self, value):

@@ -39,8 +39,8 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
         path = f"/api/lost-found/reports/{obj.pk}/image-file/"
         return request.build_absolute_uri(path) if request else path
     def validate_image(self, image):
-        if image.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Images must be 5 MB or smaller.")
+        if image.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Images must be 25 MB or smaller before compression.")
         return image
     def validate_incident_date(self, value):
         if value > timezone.localdate():
@@ -64,9 +64,21 @@ class ItemClaimSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         path = f"/api/lost-found/claims/{obj.pk}/evidence/"
         return request.build_absolute_uri(path) if request else path
+    def create(self, validated_data):
+        upload = validated_data.get("evidence")
+        if upload and upload.content_type.startswith("image/"):
+            from config.storage import optimize_uploaded_image
+            from django.utils.text import get_valid_filename
+            original_name = get_valid_filename(upload.name)[:255]
+            optimized = optimize_uploaded_image(upload, max_size=(1440, 1440), quality=78)
+            optimized.name = f"{original_name.rsplit('.', 1)[0]}.webp"
+            validated_data["evidence"] = optimized
+            validated_data["evidence_name"] = original_name
+        return super().create(validated_data)
     def validate_evidence(self, value):
-        if value and value.size > 5 * 1024 * 1024: raise serializers.ValidationError("Evidence must be 5 MB or smaller.")
         if value and value.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"): raise serializers.ValidationError("Use JPG, PNG, WEBP or PDF evidence.")
+        if value and value.content_type == "application/pdf" and value.size > 5 * 1024 * 1024: raise serializers.ValidationError("PDF evidence must be 5 MB or smaller.")
+        if value and value.content_type.startswith("image/") and value.size > 25 * 1024 * 1024: raise serializers.ValidationError("Evidence images must be 25 MB or smaller before compression.")
         if value and value.content_type == "application/pdf":
             from config.upload_validation import validate_pdf_upload
             try:

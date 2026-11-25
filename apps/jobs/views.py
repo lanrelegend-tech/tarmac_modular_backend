@@ -232,6 +232,13 @@ class JobListingViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
         listing.status = JobListing.Status.REMOVED
         listing.closed_at = timezone.now()
         listing.save(update_fields=("status", "closed_at", "updated_at"))
+        AdminLog.objects.create(
+            actor=request.user,
+            action="job_listing_owner_removed",
+            target_type="JobListing",
+            target_id=str(listing.pk),
+            metadata={"source": listing.source, "title": listing.title, "closed_at": listing.closed_at.isoformat()},
+        )
         return Response(self.get_serializer(listing).data)
 
     @action(detail=True, methods=("post",))

@@ -70,6 +70,7 @@ class User(AbstractUser):
 
 class CourseProgram(models.Model):
     name = models.CharField(max_length=160, unique=True)
+    faculty = models.CharField(max_length=120, blank=True, default="")
     duration_years = models.PositiveSmallIntegerField(default=4)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

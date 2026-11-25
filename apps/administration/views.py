@@ -920,8 +920,11 @@ class SupportTicketViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
         if len(uploads) > 5:
             raise ValidationError({"attachment_files": "Attach at most five files."})
         for upload in uploads:
-            if upload.size > 5 * 1024 * 1024 or upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
-                raise ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files no larger than 5 MB."})
+            if upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
+                raise ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files."})
+            limit = 5 if upload.content_type == "application/pdf" else 25
+            if upload.size > limit * 1024 * 1024:
+                raise ValidationError({"attachment_files": "Images must be 25 MB and PDFs 5 MB or smaller."})
             if upload.content_type == "application/pdf":
                 from config.upload_validation import validate_pdf_upload
                 try:

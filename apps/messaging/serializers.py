@@ -125,8 +125,12 @@ class MessageSerializer(serializers.ModelSerializer):
         if not str(attrs.get("body", "")).strip() and not uploads:
             raise serializers.ValidationError({"body": "Write a message or attach a file."})
         for upload in uploads:
-            if upload.size > 5 * 1024 * 1024 or upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
-                raise serializers.ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files no larger than 5 MB."})
+            if upload.content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
+                raise serializers.ValidationError({"attachment_files": "Use JPG, PNG, WEBP or PDF files."})
+            if upload.content_type == "application/pdf" and upload.size > 5 * 1024 * 1024:
+                raise serializers.ValidationError({"attachment_files": "PDF attachments must be 5 MB or smaller."})
+            if upload.content_type.startswith("image/") and upload.size > 25 * 1024 * 1024:
+                raise serializers.ValidationError({"attachment_files": "Images must be 25 MB or smaller before compression."})
             if upload.content_type == "application/pdf":
                 from config.upload_validation import validate_pdf_upload
                 try:

@@ -54,8 +54,8 @@ class AccommodationListingSerializer(serializers.ModelSerializer):
         if len(images) > 8:
             raise serializers.ValidationError("Upload no more than 8 accommodation photos.")
         for image in images:
-            if image.size > 5 * 1024 * 1024:
-                raise serializers.ValidationError("Each photo must be 5 MB or smaller.")
+            if image.size > 25 * 1024 * 1024:
+                raise serializers.ValidationError("Each photo must be 25 MB or smaller before compression.")
             if image.content_type not in ("image/jpeg", "image/png", "image/webp"):
                 raise serializers.ValidationError("Use JPG, PNG, or WEBP photos.")
         return images

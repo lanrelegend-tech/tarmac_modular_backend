@@ -26,8 +26,8 @@ class SellerReviewSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "reviewer_name", "seller_name", "identity", "identity_type", "status", "created_at")
 
     def validate_image(self, image):
-        if image and image.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Review images must be 5 MB or smaller.")
+        if image and image.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Review images must be 25 MB or smaller before compression.")
         return image
 
     def get_image_url(self, obj):

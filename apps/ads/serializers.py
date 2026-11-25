@@ -97,8 +97,8 @@ class AdCampaignSerializer(serializers.ModelSerializer):
         return keys
 
     def validate_image(self, image):
-        if image.size > 5 * 1024 * 1024:
-            raise serializers.ValidationError("Ad images must be 5 MB or smaller.")
+        if image.size > 25 * 1024 * 1024:
+            raise serializers.ValidationError("Ad images must be 25 MB or smaller before compression.")
         return image
 
     def validate_target_url(self, value):
