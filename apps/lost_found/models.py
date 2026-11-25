@@ -16,12 +16,13 @@ class LostFoundReport(models.Model):
     public_id=models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
     class Type(models.TextChoices): LOST="lost","Lost"; FOUND="found","Found"
     class Status(models.TextChoices): PENDING_REVIEW="pending_review","Pending review"; OPEN="open","Open"; MATCHED="matched","Potential match"; RETURNED="returned","Returned"; REJECTED="rejected","Rejected"; CLOSED="closed","Closed"
-    reporter=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="lost_found_reports"); report_type=models.CharField(max_length=10,choices=Type.choices)
+    reporter=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name="lost_found_reports"); submission_key=models.UUIDField(null=True,blank=True,editable=False); report_type=models.CharField(max_length=10,choices=Type.choices)
     campus=models.CharField(max_length=120, db_index=True, blank=True); title=models.CharField(max_length=160); description=models.TextField(); category=models.ForeignKey("products.Category",null=True,blank=True,on_delete=models.SET_NULL); category_label=models.CharField(max_length=80, blank=True); reward=models.CharField(max_length=120, blank=True); reviewer_note=models.TextField(blank=True)
     colour=models.CharField(max_length=60,blank=True); location=models.CharField(max_length=160); incident_date=models.DateField(); identifying_details=models.TextField(blank=True); contact_details=models.CharField(max_length=160, blank=True)
     image=models.ImageField(upload_to="lost_found/",blank=True,null=True); status=models.CharField(max_length=20,choices=Status.choices,default=Status.PENDING_REVIEW); is_active=models.BooleanField(default=False); matching_processed=models.BooleanField(default=False); created_at=models.DateTimeField(auto_now_add=True); deleted_at=models.DateTimeField(null=True, blank=True, db_index=True)
     class Meta:
         indexes = [models.Index(fields=("report_type", "is_active", "status"), name="lostfound_active_type_idx"), models.Index(fields=("category", "report_type", "is_active"), name="lostfound_category_type_idx"), models.Index(fields=("incident_date",), name="lostfound_date_idx")]
+        constraints = [models.UniqueConstraint(fields=("reporter", "submission_key"), condition=models.Q(submission_key__isnull=False), name="unique_lost_found_submission_key")]
 class ItemMatch(models.Model):
     lost_report=models.ForeignKey(LostFoundReport,on_delete=models.CASCADE,related_name="matches_as_lost"); found_report=models.ForeignKey(LostFoundReport,on_delete=models.CASCADE,related_name="matches_as_found")
     score=models.PositiveSmallIntegerField(); reasons=models.JSONField(default=list,blank=True); is_reviewed=models.BooleanField(default=False); is_dismissed=models.BooleanField(default=False); created_at=models.DateTimeField(auto_now_add=True)

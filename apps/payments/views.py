@@ -123,6 +123,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             campaign = AdCampaign.objects.select_for_update(of=("self",)).select_related("business_advertiser", "package", "ad_placement").filter(pk=campaign_id, business_advertiser=advertiser).first()
         if not campaign:
             raise PermissionDenied("This private campaign link does not grant access to this campaign.")
+        advertiser = campaign.business_advertiser
+        if advertiser is None:
+            raise PermissionDenied("This campaign is not an external business advertisement.")
         if campaign.status != AdCampaign.Status.PENDING_PAYMENT:
             raise ValidationError({"campaign": "This campaign is not awaiting payment."})
         platform = PlatformSettings.get_solo()

@@ -15,6 +15,7 @@ class JobCategorySerializer(serializers.ModelSerializer):
 
 
 class JobListingSerializer(serializers.ModelSerializer):
+    submission_key = serializers.UUIDField(required=False, write_only=True)
     campus = serializers.CharField(required=True, max_length=120)
     application_url = serializers.CharField(required=False, allow_blank=True, max_length=500)
     category_name = serializers.CharField(source="category.name", read_only=True)
@@ -29,7 +30,7 @@ class JobListingSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobListing
         fields = (
-            "id", "public_id", "source", "kind", "service_intent", "engagement", "category", "category_name", "title",
+            "id", "public_id", "submission_key", "source", "kind", "service_intent", "engagement", "category", "category_name", "title",
             "description", "requirements", "pay_type", "pay_min", "pay_max", "location", "campus",
             "working_hours", "duration", "positions", "deadline", "application_instructions",
             "application_url", "business_name", "identity_type", "poster_public_id", "poster_profile_visible", "poster_name", "poster_status",
@@ -157,6 +158,7 @@ class JobEngagementSerializer(serializers.ModelSerializer):
 
 
 class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
+    submission_key = serializers.UUIDField(required=False, write_only=True)
     campus = serializers.CharField(required=True, max_length=120)
     business_name = serializers.CharField(max_length=180)
     business_contact_name = serializers.CharField(max_length=120)
@@ -169,7 +171,7 @@ class ExternalJobSubmissionSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobListing
         fields = (
-            "kind", "service_intent", "engagement", "category", "title", "description", "requirements", "pay_type",
+            "submission_key", "kind", "service_intent", "engagement", "category", "title", "description", "requirements", "pay_type",
             "pay_min", "pay_max", "location", "campus", "working_hours", "duration", "positions", "deadline",
             "application_instructions", "application_url", "business_name", "business_contact_name",
             "business_email", "business_phone", "business_website", "business_description",

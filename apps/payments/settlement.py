@@ -99,7 +99,7 @@ def confirm_successful_payment(reference, data):
                 from apps.notifications.email import send_tarmac_email
                 transaction.on_commit(lambda: send_tarmac_email(
                     subject="Tarmac advertisement payment confirmed",
-                    text_body=f"{message}\n\nUse the private campaign tracking link in your original Tarmac submission email to check the review status.",
+                    text_body=message,
                     recipient=campaign.business_advertiser.email,
                     recipient_name=campaign.business_advertiser.contact_name,
                 ))

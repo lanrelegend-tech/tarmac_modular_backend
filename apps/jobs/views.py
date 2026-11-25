@@ -4,7 +4,7 @@ import secrets
 from datetime import timedelta
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
@@ -52,6 +52,20 @@ def _notify_admins(subject, body, data, dedupe):
     from apps.notifications.staff import notify_staff_section
     section = (data or {}).get("staff_section", "jobs")
     notify_staff_section(section, subject, body, data, dedupe)
+
+
+def _notify_job_review(listing_id, title):
+    try:
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section(
+            "jobs",
+            "Jobs & Gigs post needs review",
+            f'"{title}" was submitted and is waiting for approval.',
+            {"kind": "job_review", "listing_id": listing_id},
+            f"job-review:{listing_id}",
+        )
+    except Exception:
+        logger.exception("Could not notify staff about Jobs & Gigs listing %s", listing_id)
 
 
 class JobCategoryViewSet(viewsets.ModelViewSet):
@@ -169,13 +183,32 @@ class JobListingViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
         return qs.distinct()
 
     def perform_create(self, serializer):
+        submission_key = serializer.validated_data.pop("submission_key", None)
+        if submission_key:
+            existing = JobListing.objects.filter(
+                submission_key=submission_key, source=JobListing.Source.STUDENT,
+                owner=self.request.user,
+            ).first()
+            if existing:
+                serializer.instance = existing
+                return
         platform = PlatformSettings.get_solo()
         status_value = JobListing.Status.PENDING_REVIEW if platform.job_listing_approval_required else JobListing.Status.ACTIVE
         alias = serializer.validated_data.pop("_anonymous_identity", None)
-        listing = serializer.save(source=JobListing.Source.STUDENT, owner=self.request.user, anonymous_identity=alias, status=status_value)
+        try:
+            with transaction.atomic():
+                listing = serializer.save(source=JobListing.Source.STUDENT, owner=self.request.user, anonymous_identity=alias, status=status_value, submission_key=submission_key)
+        except IntegrityError:
+            existing = JobListing.objects.filter(
+                submission_key=submission_key, source=JobListing.Source.STUDENT,
+                owner=self.request.user,
+            ).first() if submission_key else None
+            if not existing:
+                raise
+            serializer.instance = existing
+            return
         if listing.status == JobListing.Status.PENDING_REVIEW:
-            from apps.notifications.staff import notify_staff_section
-            notify_staff_section("jobs", "Jobs & Gigs post needs review", f'"{listing.title}" was submitted and is waiting for approval.', {"kind": "job_review", "listing_id": listing.pk}, f"job-review:{listing.pk}")
+            transaction.on_commit(lambda: _notify_job_review(listing.pk, listing.title))
 
     def perform_update(self, serializer):
         listing = serializer.instance
@@ -388,12 +421,27 @@ class ExternalJobSubmissionView(APIView):
             return Response({"detail": "Check the business email address for a confirmation link."}, status=status.HTTP_201_CREATED)
         serializer = ExternalJobSubmissionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        submission_key = serializer.validated_data.pop("submission_key", None)
+        if submission_key:
+            existing = JobListing.objects.filter(
+                submission_key=submission_key, source=JobListing.Source.BUSINESS,
+            ).first()
+            if existing:
+                return Response({"detail": "This opportunity was already submitted. Check the business email for its confirmation link."}, status=status.HTTP_200_OK)
         token = secrets.token_urlsafe(32)
         expires = timezone.now() + timedelta(hours=24)
-        listing = serializer.save(
-            source=JobListing.Source.BUSINESS, owner=None, status=JobListing.Status.PENDING_EMAIL,
-            business_email_token_hash=_token_digest(token), business_email_token_expires_at=expires,
-        )
+        try:
+            with transaction.atomic():
+                listing = serializer.save(
+                    source=JobListing.Source.BUSINESS, owner=None, status=JobListing.Status.PENDING_EMAIL,
+                    submission_key=submission_key,
+                    business_email_token_hash=_token_digest(token), business_email_token_expires_at=expires,
+                )
+        except IntegrityError:
+            existing = JobListing.objects.filter(submission_key=submission_key, source=JobListing.Source.BUSINESS).first() if submission_key else None
+            if not existing:
+                raise
+            return Response({"detail": "This opportunity was already submitted. Check the business email for its confirmation link."}, status=status.HTTP_200_OK)
         frontend_origin = settings.FRONTEND_ORIGIN
         verify_url = f"{frontend_origin}/jobs/verify-submission#{token}"
         _send_external_email(

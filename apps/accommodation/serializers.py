@@ -11,6 +11,7 @@ class AccommodationImageSerializer(serializers.ModelSerializer):
 
 
 class AccommodationListingSerializer(serializers.ModelSerializer):
+    submission_key = serializers.UUIDField(required=False, write_only=True)
     campus = serializers.CharField(required=True, max_length=120)
     images = serializers.ListField(child=serializers.ImageField(), write_only=True, required=False)
     photos = serializers.SerializerMethodField()
@@ -22,7 +23,7 @@ class AccommodationListingSerializer(serializers.ModelSerializer):
     class Meta:
         model = AccommodationListing
         fields = (
-            "id", "public_id", "post_type", "accommodation_type", "title", "description", "location_area", "campus",
+            "id", "public_id", "submission_key", "post_type", "accommodation_type", "title", "description", "location_area", "campus",
             "rent_amount", "budget_min", "budget_max", "rent_period", "agency_fee", "caution_fee",
             "service_fee", "other_fees", "other_fees_note", "water_available", "electricity_available",
             "road_access", "security_available", "bathroom_available", "kitchen_available", "furnished",

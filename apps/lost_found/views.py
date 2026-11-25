@@ -44,6 +44,8 @@ class LostFoundReportViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
         return queryset.filter(campus__iexact=campus.strip()[:120]) if campus else queryset
     def perform_create(self,serializer):
         report = serializer.save(reporter=self.request.user, status=LostFoundReport.Status.PENDING_REVIEW, is_active=False)
+        if not getattr(serializer, "created_new_report", True):
+            return
         from apps.notifications.staff import notify_staff_section
         notify_staff_section("lost_found", "Lost & Found report needs review", f'"{report.title}" was submitted and is waiting for approval.', {"kind": "lost_found_review", "report_id": report.pk}, f"lost-found-review:{report.pk}")
     def perform_update(self,serializer):

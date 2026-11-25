@@ -6,6 +6,7 @@ from uuid import uuid4
 
 class AccommodationListing(models.Model):
     public_id = models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
+    submission_key = models.UUIDField(null=True, blank=True, editable=False)
     class PostType(models.TextChoices):
         SEEK_ROOMMATE = "roommate", "Looking for a roommate"
         SEEK_ACCOMMODATION = "search", "Looking for accommodation"
@@ -79,6 +80,9 @@ class AccommodationListing(models.Model):
             models.Index(fields=("status", "post_type", "created_at"), name="accom_status_type_idx"),
             models.Index(fields=("location_area", "status"), name="accom_location_status_idx"),
             models.Index(fields=("accommodation_type", "status"), name="accom_kind_status_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=("owner", "submission_key"), condition=models.Q(submission_key__isnull=False), name="accom_owner_submission_key_uniq"),
         ]
 
     def expire_if_due(self):

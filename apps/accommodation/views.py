@@ -1,6 +1,7 @@
 from datetime import timedelta
+import logging
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -20,6 +21,22 @@ from apps.accounts.models import User
 from .models import AccommodationListing, HostelAgentRequest
 from .serializers import AccommodationListingSerializer, AdminAccommodationListingSerializer, HostelAgentRequestSerializer, AdminHostelAgentRequestSerializer
 from config.throttles import ActionRateLimitMixin
+
+logger = logging.getLogger(__name__)
+
+
+def _notify_accommodation_review(listing_id, title):
+    try:
+        from apps.notifications.staff import notify_staff_section
+        notify_staff_section(
+            "accommodation",
+            "Accommodation listing needs review",
+            f'"{title}" was submitted and is waiting for approval.',
+            {"kind": "accommodation_review", "listing_id": listing_id},
+            f"accommodation-review:{listing_id}",
+        )
+    except Exception:
+        logger.exception("Could not notify staff about accommodation listing %s", listing_id)
 
 
 class AccommodationListingViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
@@ -75,15 +92,28 @@ class AccommodationListingViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
         return queryset.filter(eligible_owner, status=AccommodationListing.Status.ACTIVE).filter(public_listings).filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
 
     def perform_create(self, serializer):
+        submission_key = serializer.validated_data.get("submission_key")
+        if submission_key:
+            existing = AccommodationListing.objects.filter(owner=self.request.user, submission_key=submission_key).first()
+            if existing:
+                serializer.instance = existing
+                return
         post_type = serializer.validated_data.get("post_type")
         if post_type == AccommodationListing.PostType.OFFER_ACCOMMODATION and (not self.request.user.is_hostel_agent or self.request.user.student_status != "student"):
             raise PermissionDenied("Only currently enrolled students approved as Hostel Agents can list accommodation for rent. Request the badge from your profile or contact Tarmac support.")
         pending_count = AccommodationListing.objects.filter(owner=self.request.user, status=AccommodationListing.Status.PENDING_REVIEW).count()
         if pending_count >= 3:
             raise ValidationError({"detail": "You already have 3 accommodation posts awaiting review. Wait for a decision before submitting another."})
-        listing = serializer.save(owner=self.request.user, status=AccommodationListing.Status.PENDING_REVIEW)
-        from apps.notifications.staff import notify_staff_section
-        notify_staff_section("accommodation", "Accommodation listing needs review", f'"{listing.title}" was submitted and is waiting for approval.', {"kind": "accommodation_review", "listing_id": listing.pk}, f"accommodation-review:{listing.pk}")
+        try:
+            with transaction.atomic():
+                listing = serializer.save(owner=self.request.user, status=AccommodationListing.Status.PENDING_REVIEW)
+        except IntegrityError:
+            existing = AccommodationListing.objects.filter(owner=self.request.user, submission_key=submission_key).first() if submission_key else None
+            if not existing:
+                raise
+            serializer.instance = existing
+            return
+        transaction.on_commit(lambda: _notify_accommodation_review(listing.pk, listing.title))
 
     def perform_update(self, serializer):
         if serializer.instance.owner_id != self.request.user.pk:

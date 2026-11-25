@@ -98,8 +98,8 @@ class AdPlacementViewSet(viewsets.ModelViewSet):
         contact_name = str(request.data.get("contact_name", "")).strip()[:120]
         email = str(request.data.get("email", "")).strip().lower()
         phone = str(request.data.get("phone", "")).strip()[:32]
-        if len(business_name) < 2 or len(contact_name) < 2 or len(phone) < 7 or "@" not in email:
-            raise ValidationError({"detail": "Provide a business name, contact name, valid email and phone number."})
+        if len(business_name) < 2 or len(contact_name) < 2 or (phone and len(phone) < 7) or "@" not in email:
+            raise ValidationError({"detail": "Provide a business name, contact name, valid email, and a valid phone number if you add one."})
         advertiser = AdAdvertiser.objects.filter(email__iexact=email).first()
         if advertiser is None:
             advertiser = AdAdvertiser.objects.create(business_name=business_name, contact_name=contact_name, email=email, phone=phone)
@@ -384,8 +384,8 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         contact_name = str(request.data.get("contact_name", "")).strip()[:120]
         email = str(request.data.get("contact_email", request.data.get("email", ""))).strip().lower()
         phone = str(request.data.get("phone", "")).strip()[:32]
-        if len(business_name) < 2 or len(contact_name) < 2 or len(phone) < 7 or "@" not in email:
-            raise ValidationError({"advertiser": "Provide a business name, contact name, valid email and phone number."})
+        if len(business_name) < 2 or len(contact_name) < 2 or (phone and len(phone) < 7) or "@" not in email:
+            raise ValidationError({"advertiser": "Provide a business name, contact name, valid email, and a valid phone number if you add one."})
         advertiser = AdAdvertiser.objects.filter(email__iexact=email).first()
         if advertiser is None:
             advertiser = AdAdvertiser.objects.create(
@@ -443,15 +443,16 @@ class AdCampaignViewSet(viewsets.ModelViewSet):
         manage_url = f"{os.getenv('FRONTEND_ORIGIN', 'http://localhost:3000').split(',')[0].rstrip('/')}/advertise/manage?token={token}"
         from django.db import transaction as db_transaction
         from apps.notifications.email import send_tarmac_email
-        db_transaction.on_commit(lambda: send_tarmac_email(
-            subject="Tarmac received your advertising request",
-            text_body=(f"We received your campaign request for {placement.position}. Complete payment from your private campaign page. After Paystack confirms payment, Tarmac will review the ad before it can go live." if needs_payment else f"We received your campaign request for {placement.position}. No payment is due. Tarmac will review the ad before it can go live."),
-            recipient=advertiser.email,
-            recipient_name=advertiser.contact_name,
-            action_url=manage_url,
-            action_label="View campaign and payment status",
-        ))
-        return Response({"id": campaign.pk, "status": campaign.status, "placement": placement.position, "start_date": start_date, "end_date": end_date, "management_url": manage_url, "detail": "We sent a private campaign link to your email. Complete payment before Tarmac reviews the ad." if needs_payment else "We sent a private campaign link to your email. Tarmac will review the ad before it can go live."}, status=status.HTTP_201_CREATED)
+        if not needs_payment:
+            db_transaction.on_commit(lambda: send_tarmac_email(
+                subject="Tarmac received your advertising request",
+                text_body=f"We received your campaign request for {placement.position}. No payment is due. Tarmac will review the advert before it can go live.",
+                recipient=advertiser.email,
+                recipient_name=advertiser.contact_name,
+                action_url=manage_url,
+                action_label="View campaign status",
+            ))
+        return Response({"id": campaign.pk, "status": campaign.status, "placement": placement.position, "start_date": start_date, "end_date": end_date, "management_url": manage_url, "detail": "Continue to Paystack to complete payment." if needs_payment else "Tarmac will review the advert before it can go live."}, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["get"], url_path="public-manage")
     def public_manage(self, request):

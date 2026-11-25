@@ -20,6 +20,7 @@ class JobCategory(models.Model):
 
 class JobListing(models.Model):
     public_id = models.UUIDField(default=uuid4, unique=True, editable=False, db_index=True)
+    submission_key = models.UUIDField(null=True, blank=True, unique=True, editable=False)
     class Source(models.TextChoices):
         STUDENT = "student", "Student"
         BUSINESS = "business", "External business"

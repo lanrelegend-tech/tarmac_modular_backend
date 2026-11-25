@@ -1,4 +1,6 @@
 from rest_framework import serializers
+from datetime import timedelta
+from django.db.models import Q
 from .models import LostFoundReport,ItemMatch,ItemClaim
 from django.utils import timezone
 from apps.administration.campuses import validate_campus_choice
@@ -13,7 +15,43 @@ class LostFoundReportSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
     reporter_public_id = serializers.SerializerMethodField()
-    class Meta: model=LostFoundReport; fields=("id","public_id","report_type","title","description","category","category_label","category_name","reporter_name","reward","reviewer_note","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner","reporter_public_id"); read_only_fields=("public_id","status","reviewer_note","created_at","is_owner","reporter_name","reporter_public_id")
+    submission_key = serializers.UUIDField(required=False, write_only=True)
+    class Meta: model=LostFoundReport; fields=("id","public_id","submission_key","report_type","title","description","category","category_label","category_name","reporter_name","reward","reviewer_note","colour","location","campus","incident_date","identifying_details","contact_details","image","image_url","status","created_at","is_owner","reporter_public_id"); read_only_fields=("public_id","status","reviewer_note","created_at","is_owner","reporter_name","reporter_public_id")
+    def create(self, validated_data):
+        submission_key = validated_data.pop("submission_key", None)
+        reporter = validated_data.get("reporter")
+        if submission_key:
+            existing = LostFoundReport.objects.filter(reporter=reporter, submission_key=submission_key).first()
+            if existing:
+                self.created_new_report = False
+                return existing
+
+        # Recover safely if a client timed out after the database committed but
+        # before it received the response, even if it had to recreate the form.
+        cutoff = timezone.now() - timedelta(minutes=3)
+        duplicate = LostFoundReport.objects.filter(
+            reporter=reporter,
+            report_type=validated_data.get("report_type"),
+            title__iexact=validated_data.get("title", "").strip(),
+            campus__iexact=validated_data.get("campus", "").strip(),
+            location__iexact=validated_data.get("location", "").strip(),
+            incident_date=validated_data.get("incident_date"),
+            created_at__gte=cutoff,
+            deleted_at__isnull=True,
+        ).filter(Q(status=LostFoundReport.Status.PENDING_REVIEW) | Q(status=LostFoundReport.Status.OPEN) | Q(status=LostFoundReport.Status.MATCHED)).order_by("-created_at").first()
+        if duplicate:
+            self.created_new_report = False
+            return duplicate
+        if submission_key:
+            report, created = LostFoundReport.objects.get_or_create(
+                reporter=reporter,
+                submission_key=submission_key,
+                defaults=validated_data,
+            )
+            self.created_new_report = created
+            return report
+        self.created_new_report = True
+        return super().create(validated_data)
     def validate_campus(self, value): return validate_campus_choice(value)
     def get_is_owner(self, obj):
         request = self.context.get("request")
