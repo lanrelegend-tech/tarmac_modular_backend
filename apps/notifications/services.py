@@ -29,7 +29,7 @@ def queue_notification(user, channel, subject, body, data, dedupe_key):
     )
     # Provider calls are drained by retry_notifications, keeping user-facing
     # API requests independent from SMTP/WhatsApp network latency.
-    return notification
+    return notification, created
 
 
 def queue_push_notification(user, subject, body, data, event_key):
@@ -38,7 +38,7 @@ def queue_push_notification(user, subject, body, data, event_key):
 
     if not PushSubscription.objects.filter(user_id=user.pk).exists():
         return None
-    return queue_notification(
+    notification, _created = queue_notification(
         user,
         Notification.Channel.PUSH,
         subject,
@@ -46,6 +46,7 @@ def queue_push_notification(user, subject, body, data, event_key):
         data,
         f"{event_key}:push",
     )
+    return notification
 
 
 def notify_possible_match(match):
@@ -122,7 +123,7 @@ def notify_user(user, subject, body, data, event_key, *, dispatch_email=False, f
     email_notification = None
     if user.email and (force_email or (platform.email_notifications_enabled and category_settings.get("email", True) and user.notification_email_enabled)):
         email_data = {**(data or {}), "_force_email_delivery": True} if force_email else data
-        email_notification = queue_notification(user, Notification.Channel.EMAIL, subject, body, email_data, f"{event_key}:email")
+        email_notification, _created = queue_notification(user, Notification.Channel.EMAIL, subject, body, email_data, f"{event_key}:email")
     # Email, WhatsApp, and push are all drained by retry_notifications. Keep
     # provider network calls out of the request/commit path.
     if category_settings.get("whatsapp", False) and user.notification_whatsapp_enabled and user.whatsapp_consent_at and user.whatsapp_number:

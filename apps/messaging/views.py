@@ -31,12 +31,14 @@ class ConversationViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
         latest_message = Message.objects.filter(conversation_id=OuterRef("pk")).order_by("-created_at", "-pk")
         unread_messages = Message.objects.filter(conversation_id=OuterRef("pk"), read_at__isnull=True).exclude(sender=self.request.user).values("conversation_id").annotate(total=Count("pk")).values("total")[:1]
         completed_by_me = Conversation.completed_by.through.objects.filter(conversation_id=OuterRef("pk"), user_id=self.request.user.pk)
+        blocked_by_me = BlockedUser.objects.filter(blocked_by=self.request.user, blocked_user__conversations=OuterRef("pk"))
         queryset = Conversation.objects.filter(participants=self.request.user).prefetch_related("participants", "participant_snapshots").annotate(
             inbox_last_message_preview=Subquery(latest_message.values("body")[:1]),
             inbox_last_message_at=Subquery(latest_message.values("created_at")[:1]),
             inbox_unread_count=Coalesce(Subquery(unread_messages, output_field=IntegerField()), Value(0), output_field=IntegerField()),
             inbox_completion_count=Count("completed_by", distinct=True),
             inbox_completed_by_me=Exists(completed_by_me),
+            inbox_blocked_by_me=Exists(blocked_by_me),
         ).order_by("-updated_at", "-pk")
         identity_type = self.request.query_params.get("identity_type")
         if identity_type in ("normal", "anonymous"):
@@ -66,6 +68,17 @@ class ConversationViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
             raise ValidationError("This conversation does not have another student to block.")
         BlockedUser.objects.get_or_create(blocked_by=request.user, blocked_user=other)
         return Response({"blocked": True})
+
+    @action(detail=True, methods=["post"], url_path="unblock")
+    def unblock(self, request, pk=None):
+        conversation = self.get_object()
+        if conversation.is_official:
+            raise PermissionDenied("Official Tarmac messages do not have a student block to remove.")
+        other = conversation.participants.exclude(pk=request.user.pk).filter(is_staff=False).first()
+        if not other:
+            raise ValidationError("This conversation does not have another student to unblock.")
+        BlockedUser.objects.filter(blocked_by=request.user, blocked_user=other).delete()
+        return Response({"blocked": False, "unblocked": True})
     def perform_create(self,serializer):
         participants = serializer.validated_data.get("participants", [])
         other_users = [user for user in participants if user.pk != self.request.user.pk]
