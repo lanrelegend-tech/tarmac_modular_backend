@@ -576,6 +576,20 @@ class AdminConversationViewSet(viewsets.GenericViewSet):
         page = self.paginate_queryset(queryset)
         return self.get_paginated_response(self.get_serializer(page, many=True).data) if page is not None else Response(self.get_serializer(queryset, many=True).data)
     def retrieve(self, request, pk=None): return Response(self.get_serializer(self.get_object()).data)
+    @action(detail=True, methods=["get"], url_path="messages")
+    def messages(self, request, pk=None):
+        """Return paginated conversation history for admin review."""
+        conversation = self.get_object()
+        queryset = conversation.messages.select_related("sender", "conversation").prefetch_related(
+            "attachments", "conversation__participant_snapshots"
+        ).order_by("-created_at", "-pk")
+        page = self.paginate_queryset(queryset)
+        serializer = AdminConversationMessageSerializer(
+            page if page is not None else queryset,
+            many=True,
+            context=self.get_serializer_context(),
+        )
+        return self.get_paginated_response(serializer.data) if page is not None else Response(serializer.data)
     def partial_update(self, request, pk=None):
         conversation = self.get_object()
         value = request.data.get("status")
