@@ -123,7 +123,14 @@ class ProductViewSet(ActionRateLimitMixin, viewsets.ModelViewSet):
                 available = available.filter(area__iexact=area.strip()[:120])
             return available.order_by(F("featured_position").asc(nulls_last=True), "-created_at").distinct()
         if self.action in ("list","retrieve"):
-            own_products = qs.filter(seller=self.request.user) if self.request.user.is_authenticated else qs.none()
+            # Keep non-public listings available through the owner's direct
+            # detail URL, but never mix them into public marketplace/home feeds.
+            # Owners can see every status through the explicit `mine=true` list.
+            own_products = (
+                qs.filter(seller=self.request.user)
+                if self.action == "retrieve" and self.request.user.is_authenticated
+                else qs.none()
+            )
             requested_ids = self.request.query_params.get("ids")
             if self.action == "list" and requested_ids:
                 ids = [int(value) for value in requested_ids.split(",")[:100] if value.isdigit()]
